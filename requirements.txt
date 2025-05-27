@@ -1,0 +1,9 @@
+streamlit
+ultralytics
+pandas
+numpy
+Pillow
+scikit-learn
+joblib
+requests
+openpyxl
