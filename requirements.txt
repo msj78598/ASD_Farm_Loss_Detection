@@ -2,9 +2,9 @@ streamlit
 ultralytics
 pandas
 numpy
-Pillow
+pillow
+requests
 scikit-learn
 joblib
-requests
 opencv-python-headless
-openpyxl==3.1.2
+openpyxl
