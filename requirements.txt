@@ -1,10 +1,6 @@
 streamlit
-ultralytics
-pandas
-numpy
-pillow
-requests
-scikit-learn
-joblib
-openpyxl
+ultralytics==8.0.205
 opencv-python-headless
+Pillow
+numpy
+pandas
