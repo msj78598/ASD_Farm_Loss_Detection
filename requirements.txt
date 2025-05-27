@@ -6,5 +6,5 @@ pillow
 requests
 scikit-learn
 joblib
-opencv-python-headless
 openpyxl
+opencv-python-headless
