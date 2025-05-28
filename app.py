@@ -1,5 +1,8 @@
 # 🔧 نظام اكتشاف حالات الفاقد الكهربائي للفئة الزراعية - نسخة محدثة
 import os
+os.environ["YOLO_VERBOSE"] = "False"
+os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "0"
+
 import math
 import io
 import base64
@@ -47,7 +50,7 @@ def download_image(lat, lon, meter_id):
     url = "https://maps.googleapis.com/maps/api/staticmap"
     params = {
         "center": f"{lat},{lon}",
-        "zoom": 16,
+        "zoom": 18,
         "size": "640x640",
         "maptype": "satellite",
         "markers": f"color:red|label:X|{lat},{lon}",
