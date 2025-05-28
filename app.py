@@ -1,24 +1,14 @@
-import os
-import math
-import io
-import pandas as pd
-import requests
-from pathlib import Path
-from PIL import Image, ImageDraw
-import torch
-import joblib
 import streamlit as st
-import urllib.parse
-import base64
+import os, math, requests, io, base64
+import pandas as pd
+from PIL import Image, ImageDraw
+from ultralytics import YOLO
+import joblib
 
-# ------------------------- إعدادات Streamlit -------------------------
-st.set_page_config(
-    page_title="نظام اكتشاف حالات الفاقد الكهربائي المحتملة للفئة الزراعية",
-    layout="wide",
-    page_icon="🌾"
-)
+# ----- Streamlit Config -----
+st.set_page_config(page_title="نظام اكتشاف حالات الفاقد الزراعي", layout="wide", page_icon="🌾")
 
-# ------------------------- المسارات الرئيسية -------------------------
+# ----- Paths Setup -----
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 IMG_DIR = os.path.join(BASE_DIR, "images")
 DETECTED_DIR = os.path.join(BASE_DIR, "DETECTED_FIELDS")
@@ -27,141 +17,139 @@ OUTPUT_FOLDER = os.path.join(BASE_DIR, "output")
 MODEL_PATH = os.path.join(BASE_DIR, "models", "last.pt")
 ML_MODEL_PATH = os.path.join(BASE_DIR, "models", "isolation_model.joblib")
 SCALER_PATH = os.path.join(BASE_DIR, "models", "isolation_scaler.joblib")
-
 API_KEY = "AIzaSyAY7NJrBjS42s6upa9z_qgNLVXESuu366Q"
 ZOOM = 18
 IMG_SIZE = 640
+CALIBRATION_FACTOR = 0.6695
 
-# إنشاء المجلدات اللازمة
-os.makedirs(IMG_DIR, exist_ok=True)
-os.makedirs(DETECTED_DIR, exist_ok=True)
-os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+for folder in [IMG_DIR, DETECTED_DIR, OUTPUT_FOLDER]:
+    os.makedirs(folder, exist_ok=True)
 
-# ------------------------- تحميل النماذج -------------------------
+# ----- Load Models -----
 @st.cache_resource
 def load_models():
-    model_yolo = torch.hub.load('ultralytics/yolov5', 'custom', path=MODEL_PATH, force_reload=False)
+    model_yolo = YOLO(MODEL_PATH)
     model_ml = joblib.load(ML_MODEL_PATH)
     scaler = joblib.load(SCALER_PATH)
     return model_yolo, model_ml, scaler
 
 model_yolo, model_ml, scaler = load_models()
 
-# ------------------------- دوال المساعدة -------------------------
+# ----- Helper Functions -----
 def download_image(lat, lon, meter_id):
     img_path = os.path.join(IMG_DIR, f"{meter_id}.png")
     if os.path.exists(img_path):
         return img_path
-    url = "https://maps.googleapis.com/maps/api/staticmap"
-    params = {
-        "center": f"{lat},{lon}",
-        "zoom": ZOOM,
-        "size": f"{IMG_SIZE}x{IMG_SIZE}",
-        "maptype": "satellite",
-        "key": API_KEY
-    }
-    response = requests.get(url)
-    if response.status_code == 200:
-        with open(img_path, "wb") as f:
-            f.write(response.content)
+    url = f"https://maps.googleapis.com/maps/api/staticmap?center={lat},{lon}&zoom={ZOOM}&size={IMG_SIZE}x{IMG_SIZE}&maptype=satellite&key={API_KEY}"
+    r = requests.get(url)
+    if r.status_code == 200:
+        with open(img_path, 'wb') as f:
+            f.write(r.content)
         return img_path
     return None
 
 def detect_field(img_path, lat, meter_id):
     image = Image.open(img_path).convert("RGB")
-    results = model_yolo(image)
-    df_result = results.pandas().xyxy[0]
-    fields = df_result[(df_result["confidence"] >= 0.5)]
-    if fields.empty:
-        return None, None, None
-    nearest_field = fields.iloc[0]
-    box = [nearest_field["xmin"], nearest_field["ymin"], nearest_field["xmax"], nearest_field["ymax"]]
-    scale = 156543.03392 * abs(math.cos(math.radians(lat))) / (2 ** ZOOM)
-    area = abs(box[2]-box[0]) * abs(box[3]-box[1]) * scale**2 * 0.6695
+    results = model_yolo.predict(source=image, imgsz=IMG_SIZE, conf=0.5)[0]
+    if not results.boxes:
+        return None, None, None, None
+    box = results.boxes.xyxy[0].cpu().numpy()
+    conf = float(results.boxes.conf[0].cpu())
+    center_x, center_y = (box[0]+box[2])/2, (box[1]+box[3])/2
+    dist_px = math.hypot(center_x - IMG_SIZE/2, center_y - IMG_SIZE/2)
+    scale = 156543.03392 * math.cos(math.radians(lat)) / (2 ** ZOOM)
+    real_dist = dist_px * scale
+    if real_dist > 500:
+        return None, None, None, None
+    area = abs(box[2]-box[0]) * abs(box[3]-box[1]) * (scale**2) * CALIBRATION_FACTOR
     if area < 5000:
-        return None, None, None
+        return None, None, None, None
     draw = ImageDraw.Draw(image)
-    draw.rectangle(box, outline="green", width=3)
+    draw.rectangle(box.tolist(), outline="lime", width=3)
     out_path = os.path.join(DETECTED_DIR, f"{meter_id}.png")
     image.save(out_path)
-    confidence = round(nearest_field["confidence"] * 100, 2)
-    return confidence, out_path, int(area)
+    return conf, out_path, int(area), int(real_dist)
 
-def generate_google_maps_link(lat, lon):
-    return f"https://www.google.com/maps?q={lat},{lon}"
+def priority(consumption, area, breaker):
+    if area > 50000 and (breaker < 200 or consumption < 10000):
+        return "قصوى", "high"
+    elif consumption < 10000:
+        return "عالية", "medium"
+    else:
+        return "منخفضة", "low"
 
-def generate_whatsapp_share_link(meter_id, area, consumption, location_link):
-    message = f"عداد: {meter_id}\nمساحة: {area:,} م²\nاستهلاك: {consumption:,} ك.و.س\n{location_link}"
-    return f"https://wa.me/?text={urllib.parse.quote(message)}"
+def to_excel(df):
+    output = io.BytesIO()
+    with pd.ExcelWriter(output) as writer:
+        df.to_excel(writer, index=False)
+    return output.getvalue()
 
-# ------------------------- واجهة Streamlit -------------------------
-st.markdown("<h1 style='text-align:center;'>🌾 نظام اكتشاف حالات الفاقد الكهربائي المحتملة للفئة الزراعية</h1>", unsafe_allow_html=True)
+# ----- CSS -----
+st.markdown("""
+<style>
+.high{background:#ffebee;border-left:5px solid #f44336;}
+.medium{background:#fff3e0;border-left:5px solid #ff9800;}
+.low{background:#e8f5e9;border-left:5px solid #4caf50;}
+.card{padding:10px;border-radius:10px;margin:10px;box-shadow:0 2px 4px rgba(0,0,0,0.1);}
+img{border-radius:8px;}
+</style>
+""", unsafe_allow_html=True)
 
-uploaded_file = st.file_uploader("📁 رفع ملف البيانات (Excel)", type=["xlsx"])
+# ----- UI -----
+st.title("🌾 نظام اكتشاف حالات الفاقد الزراعي")
+
+uploaded_file = st.file_uploader("📁 رفع ملف البيانات Excel", type=["xlsx"])
+
+# Filter UI
+sort_col = st.sidebar.selectbox("فرز حسب:", ["بدون", "consumption", "Breaker"])
+sort_order = st.sidebar.radio("نوع الفرز:", ["تصاعدي", "تنازلي"], horizontal=True)
 
 if uploaded_file:
     df = pd.read_excel(uploaded_file)
-
-    tab1, tab2 = st.tabs(["🎯 النتائج المباشرة", "📊 البيانات الخام"])
+    if sort_col != "بدون":
+        df.sort_values(by=sort_col, ascending=(sort_order=="تصاعدي"), inplace=True)
+    
+    tab1, tab2 = st.tabs(["🎯 النتائج", "📊 البيانات الخام"])
 
     results = []
     with tab1:
         progress_bar = st.progress(0)
         for idx, row in df.iterrows():
+            progress_bar.progress((idx+1)/len(df))
             meter_id, lat, lon = row["Subscription"], row["y"], row["x"]
             breaker, consumption = row["Breaker"], row["consumption"]
-
             img_path = download_image(lat, lon, meter_id)
             if not img_path:
                 continue
-
-            conf, img_detected, area = detect_field(img_path, lat, meter_id)
-            if conf is None:
+            conf, img_detected, area, dist = detect_field(img_path, lat, meter_id)
+            if not img_detected:
                 continue
-
-            location_link = generate_google_maps_link(lat, lon)
-            whatsapp_link = generate_whatsapp_share_link(meter_id, area, consumption, location_link)
-
-            results.append({
-                "meter_id": meter_id,
-                "confidence": conf,
-                "area": area,
-                "consumption": consumption,
-                "breaker": breaker,
-                "location_link": location_link,
-                "whatsapp_link": whatsapp_link
-            })
-
-            with open(img_detected, "rb") as img_file:
-                img_base64 = base64.b64encode(img_file.read()).decode()
-
+            pri, css_class = priority(consumption, area, breaker)
+            with open(img_detected, "rb") as f:
+                img_b64 = base64.b64encode(f.read()).decode()
             st.markdown(f"""
-            <div style='border:1px solid #ddd;padding:15px;border-radius:10px;margin-bottom:15px;'>
-                <img src='data:image/png;base64,{img_base64}' width='300'>
-                <p><b>عداد:</b> {meter_id}</p>
-                <p><b>الثقة:</b> {conf}%</p>
-                <p><b>المساحة:</b> {area:,} م²</p>
-                <p><b>الاستهلاك:</b> {consumption:,} ك.و.س</p>
-                <a href='{whatsapp_link}' target='_blank'>📤 واتساب</a> |
-                <a href='{location_link}' target='_blank'>📍 خريطة</a>
-            </div>
-            """, unsafe_allow_html=True)
-
-            progress_bar.progress((idx + 1) / len(df))
+                <div class='card {css_class}'>
+                <img src='data:image/png;base64,{img_b64}' width='300'/>
+                <h4>عداد: {meter_id}</h4>
+                <p>📐 مساحة: {area:,} م² | 📍بعد العداد: {dist}م</p>
+                <p>📊 ثقة الكشف: {conf*100:.1f}%</p>
+                <p>💡 الاستهلاك: {consumption:,} | ⚡ القاطع: {breaker}A</p>
+                <p>🚨 الأولوية: {pri}</p>
+                </div>""", unsafe_allow_html=True)
+            results.append({
+                "عداد": meter_id, "مساحة": area, "مسافة (م)": dist,
+                "ثقة": conf, "استهلاك": consumption, "قاطع": breaker, "أولوية": pri
+            })
 
     with tab2:
         st.dataframe(df)
 
     if results:
         df_results = pd.DataFrame(results)
-        buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
-            df_results.to_excel(writer, index=False)
-        st.sidebar.download_button("📥 تصدير النتائج كملف Excel", data=buffer.getvalue(), file_name="نتائج_الفحص.xlsx")
-
-        st.sidebar.markdown("### 📊 إحصائيات")
-        st.sidebar.metric("🔢 عدد الحالات", len(results))
+        st.sidebar.download_button("📥 تصدير Excel", data=to_excel(df_results), file_name="نتائج_الفحص.xlsx")
+        st.sidebar.metric("🔴 قصوى", (df_results["أولوية"]=="قصوى").sum())
+        st.sidebar.metric("🟠 عالية", (df_results["أولوية"]=="عالية").sum())
+        st.sidebar.metric("🟢 منخفضة", (df_results["أولوية"]=="منخفضة").sum())
 
 else:
-    st.info("يرجى رفع ملف البيانات للبدء.")
-
+    st.info("⬆️ الرجاء رفع ملف البيانات للبدء")
