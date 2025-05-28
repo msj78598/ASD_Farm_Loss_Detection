@@ -151,26 +151,27 @@ if uploaded_file:
         img_b64 = base64.b64encode(open(img_detected, "rb").read()).decode()
 
         st.markdown(f"""
-        <div class="card priority-{css_class}">
-            <div class="card-header">
-                <h3>🔢 العداد: {meter_id}</h3>
-                <span class="priority-badge {css_class}-badge">{pri}</span>
-            </div>
-            <div class="card-content">
-                <img class="card-image" src="data:image/png;base64,{img_b64}">
-                <div class="card-details">
-                    <div class="detail-row"><span class="detail-label">المكتب:</span><span>{office}</span></div>
-                    <div class="detail-row"><span class="detail-label">ثقة الكشف:</span><span>{conf*100:.1f}%</span></div>
-                    <div class="detail-row"><span class="detail-label">المساحة:</span><span>{area:,} م²</span></div>
-                    <div class="detail-row"><span class="detail-label">الاستهلاك:</span><span>{consumption:,}</span></div>
-                    <div class="detail-row"><span class="detail-label">القاطع:</span><span>{breaker}</span></div>
-                    <div class="card-actions">
-                        <a class="action-btn whatsapp-btn" href="{generate_whatsapp_share_link(meter_id, area, consumption, generate_google_maps_link(lat,lon))}">واتساب</a>
-                        <a class="action-btn map-btn" href="{generate_google_maps_link(lat,lon)}">خريطة</a>
-                    </div>
-                </div>
-            </div>
+<div class="card priority-{css_class}">
+    <div class="card-header">
+        <h3>🔢 العداد: {meter_id}</h3>
+        <span class="priority-badge {css_class}-badge">{pri}</span>
+    </div>
+    <div class="card-content">
+        <img class="card-image" src="data:image/png;base64,{img_b64}">
+        <div class="card-details">
+            <div class="detail-row"><span class="detail-label">المكتب:</span><span>{office}</span></div>
+            <div class="detail-row"><span class="detail-label">ثقة الكشف:</span><span>{conf*100:.1f}%</span></div>
+            <div class="detail-row"><span class="detail-label">المساحة:</span><span>{area:,} م²</span></div>
+            <div class="detail-row"><span class="detail-label">الاستهلاك:</span><span>{consumption:,}</span></div>
+            <div class="detail-row"><span class="detail-label">القاطع:</span><span>{breaker}</span></div>
         </div>
-        """, unsafe_allow_html=True)
+    </div>
+    <div class="card-actions">
+        <a class="action-btn whatsapp-btn" href="{generate_whatsapp_share_link(meter_id, area, consumption, generate_google_maps_link(lat,lon))}">📱 واتساب</a>
+        <a class="action-btn map-btn" href="{generate_google_maps_link(lat,lon)}">📍 خريطة الموقع</a>
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
 
     status_text.text("✅ تم بنجاح")
