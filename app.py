@@ -132,20 +132,37 @@ if uploaded_file:
             with open(img_detected, "rb") as f:
                 img_b64 = base64.b64encode(f.read()).decode()
 
-            # البطاقة الجديدة المعدلة بشكل احترافي
             st.markdown(f"""
-            <div style='display:flex;align-items:center;border-radius:12px;padding:10px;box-shadow:0 4px 8px rgba(0,0,0,0.1);background-color:#fff;margin-bottom:15px;border-left:5px solid {{"high":"#f44336","medium":"#ff9800","low":"#4caf50"}[css_class]};'>
-                <img src='data:image/png;base64,{img_b64}' width='180' style='border-radius:8px;margin-left:15px;'/>
-                <div style='flex:1;'>
-                    <h4 style='margin:5px 0;font-size:16px;'>🔢 عداد: {meter_id}</h4>
-                    <p style='margin:3px;'>🏢 المكتب: {office_number}</p>
-                    <p style='margin:3px;'>📐 المساحة: {area:,} م² | 📍 بعد العداد: {dist} م</p>
-                    <p style='margin:3px;'>📊 الثقة: {conf*100:.1f}%</p>
-                    <p style='margin:3px;'>💡 الاستهلاك: {consumption:,} ك.و.س | ⚡ القاطع: {breaker} أمبير</p>
-                    <p style='margin:3px;font-weight:bold;'>🚨 الأولوية: {pri}</p>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+<div style='
+    display: flex; 
+    align-items: center;
+    justify-content: space-between;
+    border-radius: 12px; 
+    padding: 12px; 
+    box-shadow: 0 2px 6px rgba(0,0,0,0.15); 
+    background-color: #ffffff; 
+    margin-bottom: 12px; 
+    border-right: 6px solid {{"high":"#e74c3c","medium":"#f39c12","low":"#2ecc71"}[css_class]};
+    direction: rtl;'>
+    
+    <div style='flex: 1; padding-left: 15px; text-align: right;'>
+        <h3 style='margin-bottom:6px; font-size:17px; color:#34495e;'>🔢 عداد: {meter_id}</h3>
+        <p style='margin:4px 0; font-size:14px;'>🏢 المكتب: {office_number}</p>
+        <p style='margin:4px 0; font-size:14px;'>📐 المساحة: {area:,} م²</p>
+        <p style='margin:4px 0; font-size:14px;'>📍 بعد العداد: {dist} م</p>
+        <p style='margin:4px 0; font-size:14px;'>📊 ثقة اكتشاف الحقل: {conf*100:.1f}%</p>
+        <p style='margin:4px 0; font-size:14px;'>💡 الاستهلاك: {consumption:,} ك.و.س</p>
+        <p style='margin:4px 0; font-size:14px;'>⚡ القاطع: {breaker} أمبير</p>
+        <p style='margin:4px 0; font-size:14px; font-weight:bold;'>
+            🚨 الأولوية: {pri}
+        </p>
+    </div>
+
+    <img src='data:image/png;base64,{img_b64}' 
+         style='width:170px; height:170px; border-radius:8px; object-fit:cover;'/>
+</div>
+""", unsafe_allow_html=True)
+
 
             results.append({
                 "عداد": meter_id, 
