@@ -1,9 +1,10 @@
-streamlit
+torch
+torchvision
 ultralytics
-opencv-python-headless
-Pillow
-numpy
-pandas
-joblib
-openpyxl
+opencv-python
 scikit-learn
+numpy
+matplotlib
+pandas
+tqdm
+Pillow
