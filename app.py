@@ -5,7 +5,7 @@ from PIL import Image, ImageDraw
 from ultralytics import YOLO
 import joblib
 
-# إعدادات Streamlit (أول أمر بعد الاستيراد مباشرة)
+# إعدادات Streamlit
 st.set_page_config(
     page_title="نظام اكتشاف حالات الفاقد الزراعي",
     layout="wide",
@@ -22,7 +22,7 @@ MODEL_PATH = os.path.join(BASE_DIR, "models", "last.pt")
 ML_MODEL_PATH = os.path.join(BASE_DIR, "models", "isolation_model.joblib")
 SCALER_PATH = os.path.join(BASE_DIR, "models", "isolation_scaler.joblib")
 API_KEY = "AIzaSyAY7NJrBjS42s6upa9z_qgNLVXESuu366Q"
-ZOOM = 18
+ZOOM = 15  # تعديل الزوم حسب طلبك
 IMG_SIZE = 640
 CALIBRATION_FACTOR = 0.6695
 
@@ -54,7 +54,7 @@ def download_image(lat, lon, meter_id):
 
 def detect_field(img_path, lat, meter_id):
     image = Image.open(img_path).convert("RGB")
-    results = model_yolo.predict(source=image, imgsz=IMG_SIZE, conf=0.5)[0]
+    results = model_yolo.predict(source=image, imgsz=IMG_SIZE, conf=0.3)[0]
     if len(results.boxes) == 0:
         return None, None, None, None
     box = results.boxes.xyxy[0].cpu().numpy()
@@ -63,11 +63,7 @@ def detect_field(img_path, lat, meter_id):
     dist_px = math.hypot(center_x - IMG_SIZE/2, center_y - IMG_SIZE/2)
     scale = 156543.03392 * math.cos(math.radians(lat)) / (2 ** ZOOM)
     real_dist = dist_px * scale
-    if real_dist > 500:
-        return None, None, None, None
     area = abs(box[2]-box[0]) * abs(box[3]-box[1]) * (scale**2) * CALIBRATION_FACTOR
-    if area < 5000:
-        return None, None, None, None
     draw = ImageDraw.Draw(image)
     draw.rectangle(box.tolist(), outline="lime", width=3)
     out_path = os.path.join(DETECTED_DIR, f"{meter_id}.png")
@@ -88,14 +84,12 @@ def to_excel(df):
         df.to_excel(writer, index=False)
     return output.getvalue()
 
-# تصميم CSS للواجهة
+# تصميم CSS
 st.markdown("""
 <style>
 .high{background:#ffebee;border-left:5px solid #f44336;}
 .medium{background:#fff3e0;border-left:5px solid #ff9800;}
 .low{background:#e8f5e9;border-left:5px solid #4caf50;}
-.card{padding:10px;border-radius:10px;margin:10px;box-shadow:0 2px 4px rgba(0,0,0,0.1);}
-img{border-radius:8px;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -124,6 +118,7 @@ if uploaded_file:
             status_text.text(f"معالجة الحالة رقم {idx+1} من {len(df)}")
             meter_id, lat, lon = row["Subscription"], row["y"], row["x"]
             breaker, consumption = row["Breaker"], row["consumption"]
+            office_number = row["Office"]
 
             img_path = download_image(lat, lon, meter_id)
             if not img_path:
@@ -136,19 +131,31 @@ if uploaded_file:
             pri, css_class = determine_priority(consumption, area, breaker)
             with open(img_detected, "rb") as f:
                 img_b64 = base64.b64encode(f.read()).decode()
+
+            # البطاقة الجديدة المعدلة بشكل احترافي
             st.markdown(f"""
-                <div class='card {css_class}'>
-                    <img src='data:image/png;base64,{img_b64}' width='300'/>
-                    <h4>عداد: {meter_id}</h4>
-                    <p>📐 مساحة: {area:,} م² | 📍بعد العداد: {dist} م</p>
-                    <p>📊 ثقة الكشف: {conf*100:.1f}%</p>
-                    <p>💡 الاستهلاك: {consumption:,} | ⚡ القاطع: {breaker} A</p>
-                    <p>🚨 الأولوية: {pri}</p>
-                </div>""", unsafe_allow_html=True)
-            
+            <div style='display:flex;align-items:center;border-radius:12px;padding:10px;box-shadow:0 4px 8px rgba(0,0,0,0.1);background-color:#fff;margin-bottom:15px;border-left:5px solid {{"high":"#f44336","medium":"#ff9800","low":"#4caf50"}[css_class]};'>
+                <img src='data:image/png;base64,{img_b64}' width='180' style='border-radius:8px;margin-left:15px;'/>
+                <div style='flex:1;'>
+                    <h4 style='margin:5px 0;font-size:16px;'>🔢 عداد: {meter_id}</h4>
+                    <p style='margin:3px;'>🏢 المكتب: {office_number}</p>
+                    <p style='margin:3px;'>📐 المساحة: {area:,} م² | 📍 بعد العداد: {dist} م</p>
+                    <p style='margin:3px;'>📊 الثقة: {conf*100:.1f}%</p>
+                    <p style='margin:3px;'>💡 الاستهلاك: {consumption:,} ك.و.س | ⚡ القاطع: {breaker} أمبير</p>
+                    <p style='margin:3px;font-weight:bold;'>🚨 الأولوية: {pri}</p>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
             results.append({
-                "عداد": meter_id, "مساحة": area, "مسافة (م)": dist,
-                "ثقة": conf, "استهلاك": consumption, "قاطع": breaker, "أولوية": pri
+                "عداد": meter_id, 
+                "مكتب": office_number,
+                "مساحة": area, 
+                "مسافة (م)": dist,
+                "ثقة": conf, 
+                "استهلاك": consumption, 
+                "قاطع": breaker, 
+                "أولوية": pri
             })
 
         status_text.text("✅ اكتملت المعالجة!")
