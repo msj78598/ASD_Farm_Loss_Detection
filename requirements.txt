@@ -1,10 +1,1 @@
-torch
-torchvision
-ultralytics
-opencv-python
-scikit-learn
-numpy
-matplotlib
-pandas
-tqdm
-Pillow
+
