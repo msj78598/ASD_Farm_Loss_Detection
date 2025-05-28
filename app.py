@@ -93,100 +93,69 @@ def generate_whatsapp_share_link(meter_id, area, consumption, location_link):
     message = f"عداد: {meter_id}\\nمساحة: {area:,} م²\\nاستهلاك: {consumption:,} ك.و.س\\n{location_link}"
     return f"https://wa.me/?text={requests.utils.quote(message)}"
 
-# الدفعة الأولى: الإعدادات العامة وتحميل النماذج ودوال المساعدة
+# الدفعة الثانية: تصميم واجهة المستخدم الكامل مع CSS، وإضافة عناصر الفرز والتحميل والـTabs
 
-import os
-import math
-import requests
-from pathlib import Path
-from PIL import Image, ImageDraw
 import streamlit as st
-import joblib
-from ultralytics import YOLO
+import pandas as pd
 
-# ---------------------- إعدادات عامة ----------------------
-st.set_page_config(
-    page_title="نظام اكتشاف حالات الفاقد الكهربائي المحتملة للفئة الزراعية",
-    layout="wide",
-    page_icon="🌾"
-)
+# ---------------------- إعدادات CSS ----------------------
+st.markdown("""
+<style>
+.main {direction: rtl; text-align: right; font-family: Arial, sans-serif;}
+.header {
+    background-color: #2c3e50; color: white; padding: 15px; border-radius: 10px;
+    margin-bottom: 30px; text-align: center;
+}
+.card {
+    border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+    padding: 20px; margin-bottom: 25px; border-left: 5px solid;
+    background-color: #f9f9f9; display: flex; gap: 25px;
+}
+.priority-high {border-color: #ff0000; background-color: #ffebee;}
+.priority-medium {border-color: #ffa500; background-color: #fff3e0;}
+.priority-low {border-color: #008000; background-color: #e8f5e9;}
+.card img {border-radius: 8px; border: 1px solid #ddd; width: 300px;}
+.details {flex: 1;}
+.action-btn {
+    padding: 8px 15px; border-radius: 5px; text-decoration: none;
+    font-weight: bold; margin-top: 10px; display: inline-block;
+}
+.whatsapp {background-color: #25D366; color: white;}
+.map {background-color: #4285F4; color: white;}
+</style>
+""", unsafe_allow_html=True)
 
-# ---------------------- إعدادات المسارات ----------------------
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-IMG_DIR = os.path.join(BASE_DIR, "images")
-DETECTED_DIR = os.path.join(BASE_DIR, "DETECTED_FIELDS")
-OUTPUT_FOLDER = os.path.join(BASE_DIR, "output")
+# ---------------------- واجهة المستخدم ----------------------
+st.markdown("""
+<div class="header">
+    <h1>🌾 نظام اكتشاف حالات الفاقد الكهربائي المحتملة للفئة الزراعية</h1>
+</div>
+""", unsafe_allow_html=True)
 
-MODEL_PATH = os.path.join(BASE_DIR, "models", "last.pt")
-ML_MODEL_PATH = os.path.join(BASE_DIR, "models", "isolation_model.joblib")
-SCALER_PATH = os.path.join(BASE_DIR, "models", "isolation_scaler.joblib")
+# تحميل البيانات
+uploaded_file = st.file_uploader("📁 رفع ملف البيانات (Excel)", type=["xlsx"])
 
-CALIBRATION_FACTOR = 0.6695
-ZOOM = 18
-IMG_SIZE = 640
-API_KEY = "API_KEY"
+# خيارات الفرز
+sort_columns = ["بدون", "consumption", "Breaker"]
+sort_col = st.sidebar.selectbox("اختر حقل الفرز:", sort_columns)
+sort_order = st.sidebar.radio("نوع الفرز:", ["تصاعدي", "تنازلي"], index=0, horizontal=True)
 
-# إنشاء المجلدات الضرورية
-for path in [IMG_DIR, DETECTED_DIR, OUTPUT_FOLDER]:
-    os.makedirs(path, exist_ok=True)
+# التبويبات
+if uploaded_file:
+    df = pd.read_excel(uploaded_file)
 
-# ---------------------- تحميل النماذج ----------------------
-@st.cache_resource
-def load_models():
-    model_yolo = YOLO(MODEL_PATH)
-    model_ml = joblib.load(ML_MODEL_PATH)
-    scaler = joblib.load(SCALER_PATH)
-    return model_yolo, model_ml, scaler
+    if sort_col != "بدون":
+        df.sort_values(by=sort_col, ascending=(sort_order == "تصاعدي"), inplace=True)
 
-# ---------------------- دوال المساعدة ----------------------
-def download_image(lat, lon, meter_id):
-    img_path = os.path.join(IMG_DIR, f"{meter_id}.png")
-    if os.path.exists(img_path):
-        return img_path
-    url = "https://maps.googleapis.com/maps/api/staticmap"
-    params = {
-        "center": f"{lat},{lon}",
-        "zoom": ZOOM,
-        "size": f"{IMG_SIZE}x{IMG_SIZE}",
-        "maptype": "satellite",
-        "key": API_KEY
-    }
-    response = requests.get(url)
-    if response.status_code == 200:
-        with open(img_path, "wb") as f:
-            f.write(response.content)
-        return img_path
-    return None
+    tab1, tab2 = st.tabs(["🎯 النتائج المباشرة", "📊 البيانات الخام"])
 
-def detect_field(img_path, lat, meter_id, model_yolo):
-    image = Image.open(img_path).convert("RGB")
-    results = model_yolo.predict(source=image, imgsz=IMG_SIZE, conf=0.5)[0]
-    if not results.boxes:
-        return None, None, None
-    box = results.boxes[0].xyxy[0].cpu().numpy()
-    conf = float(results.boxes[0].conf.cpu().numpy())
-    box_center_x = (box[0] + box[2]) / 2
-    box_center_y = (box[1] + box[3]) / 2
-    dist = math.sqrt((box_center_x - IMG_SIZE/2)**2 + (box_center_y - IMG_SIZE/2)**2)
-    scale = 156543.03392 * math.cos(math.radians(lat)) / (2 ** ZOOM)
-    real_dist = dist * scale
-    if real_dist > 500:
-        return None, None, None
-    area = abs(box[2] - box[0]) * abs(box[3] - box[1]) * (scale**2) * CALIBRATION_FACTOR
-    if area < 5000:
-        return None, None, None
-    draw = ImageDraw.Draw(image)
-    draw.rectangle(box.tolist(), outline="green", width=3)
-    out_path = os.path.join(DETECTED_DIR, f"{meter_id}.png")
-    image.save(out_path)
-    return round(conf * 100, 2), out_path, int(area)
+    with tab1:
+        st.write("سيتم عرض النتائج هنا بعد معالجة البيانات.")
 
-def generate_google_maps_link(lat, lon):
-    return f"https://www.google.com/maps?q={lat},{lon}"
+    with tab2:
+        st.dataframe(df)
 
-def generate_whatsapp_share_link(meter_id, area, consumption, location_link):
-    message = f"عداد: {meter_id}\\nمساحة: {area:,} م²\\nاستهلاك: {consumption:,} ك.و.س\\n{location_link}"
-    return f"https://wa.me/?text={requests.utils.quote(message)}"
+
 
 # الدفعة الثالثة: حلقة معالجة البيانات وعرض النتائج بشكل متقدم، مع ميزة التصدير وإحصائيات الشريط الجانبي
 
@@ -275,4 +244,3 @@ if uploaded_file:
         st.sidebar.metric("🔴 حالات قصوى", high_priority)
         st.sidebar.metric("🟠 حالات متوسطة", medium_priority)
         st.sidebar.metric("🟢 حالات منخفضة", low_priority)
-
