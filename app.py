@@ -18,7 +18,7 @@ import urllib.parse
 
 # ------------------------- إعدادات عامة -------------------------
 st.set_page_config(
-    page_title="نظام اكتشاف حالات الفاقد للفئة الزراعية المحتملة ",
+    page_title="نظام اكتشاف حالات الفاقد للفئة الزراعية",
     layout="wide",
     page_icon="🌾"
 )
@@ -28,7 +28,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 IMG_DIR = os.path.join(BASE_DIR, "images")
 DETECTED_DIR = os.path.join(BASE_DIR, "DETECTED_FIELDS")
 OUTPUT_FOLDER = os.path.join(BASE_DIR, "output")
-MODEL_PATH = os.path.join(BASE_DIR, "models", "best.pt")
+MODEL_PATH = os.path.join(BASE_DIR, "models", "last.pt")
 ML_MODEL_PATH = os.path.join(BASE_DIR, "models", "isolation_model.joblib")
 SCALER_PATH = os.path.join(BASE_DIR, "models", "isolation_scaler.joblib")
 CALIBRATION_FACTOR = 0.6695
