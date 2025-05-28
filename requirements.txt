@@ -7,3 +7,4 @@ Pillow
 scikit-learn
 requests
 opencv-python-headless
+openpyxl
