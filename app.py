@@ -18,7 +18,7 @@ IMG_DIR = os.path.join(BASE_DIR, "images")
 DETECTED_DIR = os.path.join(BASE_DIR, "DETECTED_FIELDS")
 OUTPUT_FOLDER = os.path.join(BASE_DIR, "output")
 
-MODEL_PATH = os.path.join(BASE_DIR, "models", "last.pt")
+MODEL_PATH = os.path.join(BASE_DIR, "models", "best.pt")
 ML_MODEL_PATH = os.path.join(BASE_DIR, "models", "isolation_model.joblib")
 SCALER_PATH = os.path.join(BASE_DIR, "models", "isolation_scaler.joblib")
 
@@ -137,7 +137,7 @@ if uploaded_file:
         progress_bar.progress((idx+1)/len(df))
         status_text.text(f"معالجة الحالة رقم {idx+1} من {len(df)}")
         meter_id, lat, lon = row["Subscription"], row["y"], row["x"]
-        breaker, consumption, office_number = row["Breaker"], row["consumption"], row["Office"]
+        breaker, consumption, office = row["Breaker"], row["consumption"], row["Office"]
 
         img_path = download_image(lat, lon, meter_id)
         if not img_path:
@@ -159,7 +159,7 @@ if uploaded_file:
             <div class="card-content">
                 <img class="card-image" src="data:image/png;base64,{img_b64}">
                 <div class="card-details">
-                    <div class="detail-row"><span class="detail-label">المكتب:</span><span>{office_number}</span></div>
+                    <div class="detail-row"><span class="detail-label">المكتب:</span><span>{office}</span></div>
                     <div class="detail-row"><span class="detail-label">ثقة الكشف:</span><span>{conf*100:.1f}%</span></div>
                     <div class="detail-row"><span class="detail-label">المساحة:</span><span>{area:,} م²</span></div>
                     <div class="detail-row"><span class="detail-label">الاستهلاك:</span><span>{consumption:,}</span></div>
