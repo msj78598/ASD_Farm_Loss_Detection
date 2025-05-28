@@ -1,22 +1,27 @@
-# الدفعة الأولى: الإعدادات العامة وتحميل النماذج ودوال المساعدة
-
-import os
-import math
-import requests
-from pathlib import Path
-from PIL import Image, ImageDraw
+# استيراد مكتبة Streamlit أولًا
 import streamlit as st
-import joblib
-from ultralytics import YOLO
 
-# ---------------------- إعدادات عامة ----------------------
+# إعداد الصفحة يجب أن يكون أول أمر Streamlit
 st.set_page_config(
     page_title="نظام اكتشاف حالات الفاقد الكهربائي المحتملة للفئة الزراعية",
     layout="wide",
     page_icon="🌾"
 )
 
-# ---------------------- إعدادات المسارات ----------------------
+# استيراد المكتبات بعد set_page_config
+import os
+import math
+import requests
+from pathlib import Path
+from PIL import Image, ImageDraw
+import joblib
+import pandas as pd
+import numpy as np
+import base64
+import io
+from ultralytics import YOLO
+
+# ---------------- إعدادات المسارات ----------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 IMG_DIR = os.path.join(BASE_DIR, "images")
 DETECTED_DIR = os.path.join(BASE_DIR, "DETECTED_FIELDS")
@@ -35,7 +40,7 @@ API_KEY = "API_KEY"
 for path in [IMG_DIR, DETECTED_DIR, OUTPUT_FOLDER]:
     os.makedirs(path, exist_ok=True)
 
-# ---------------------- تحميل النماذج ----------------------
+# ---------------- تحميل النماذج ----------------
 @st.cache_resource
 def load_models():
     model_yolo = YOLO(MODEL_PATH)
@@ -43,7 +48,9 @@ def load_models():
     scaler = joblib.load(SCALER_PATH)
     return model_yolo, model_ml, scaler
 
-# ---------------------- دوال المساعدة ----------------------
+model_yolo, model_ml, scaler = load_models()
+
+# ---------------- دوال المساعدة ----------------
 def download_image(lat, lon, meter_id):
     img_path = os.path.join(IMG_DIR, f"{meter_id}.png")
     if os.path.exists(img_path):
@@ -90,157 +97,35 @@ def generate_google_maps_link(lat, lon):
     return f"https://www.google.com/maps?q={lat},{lon}"
 
 def generate_whatsapp_share_link(meter_id, area, consumption, location_link):
-    message = f"عداد: {meter_id}\\nمساحة: {area:,} م²\\nاستهلاك: {consumption:,} ك.و.س\\n{location_link}"
+    message = f"عداد: {meter_id}\nمساحة: {area:,} م²\nاستهلاك: {consumption:,} ك.و.س\n{location_link}"
     return f"https://wa.me/?text={requests.utils.quote(message)}"
 
-# الدفعة الثانية: تصميم واجهة المستخدم الكامل مع CSS، وإضافة عناصر الفرز والتحميل والـTabs
-
-import streamlit as st
-import pandas as pd
-
-# ---------------------- إعدادات CSS ----------------------
+# ---------------- إعدادات CSS ----------------
 st.markdown("""
 <style>
 .main {direction: rtl; text-align: right; font-family: Arial, sans-serif;}
-.header {
-    background-color: #2c3e50; color: white; padding: 15px; border-radius: 10px;
-    margin-bottom: 30px; text-align: center;
-}
-.card {
-    border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1);
-    padding: 20px; margin-bottom: 25px; border-left: 5px solid;
-    background-color: #f9f9f9; display: flex; gap: 25px;
-}
+.header {background-color: #2c3e50; color: white; padding: 15px; border-radius: 10px; text-align: center; margin-bottom: 30px;}
+.card {border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); padding: 20px; margin-bottom: 25px; border-left: 5px solid; display: flex; gap: 25px;}
 .priority-high {border-color: #ff0000; background-color: #ffebee;}
 .priority-medium {border-color: #ffa500; background-color: #fff3e0;}
 .priority-low {border-color: #008000; background-color: #e8f5e9;}
 .card img {border-radius: 8px; border: 1px solid #ddd; width: 300px;}
 .details {flex: 1;}
-.action-btn {
-    padding: 8px 15px; border-radius: 5px; text-decoration: none;
-    font-weight: bold; margin-top: 10px; display: inline-block;
-}
+.action-btn {padding: 8px 15px; border-radius: 5px; font-weight: bold;}
 .whatsapp {background-color: #25D366; color: white;}
 .map {background-color: #4285F4; color: white;}
 </style>
 """, unsafe_allow_html=True)
 
-# ---------------------- واجهة المستخدم ----------------------
+# ---------------- واجهة المستخدم ----------------
 st.markdown("""
 <div class="header">
     <h1>🌾 نظام اكتشاف حالات الفاقد الكهربائي المحتملة للفئة الزراعية</h1>
 </div>
 """, unsafe_allow_html=True)
 
-# تحميل البيانات
 uploaded_file = st.file_uploader("📁 رفع ملف البيانات (Excel)", type=["xlsx"])
 
-# خيارات الفرز
-sort_columns = ["بدون", "consumption", "Breaker"]
-sort_col = st.sidebar.selectbox("اختر حقل الفرز:", sort_columns)
-sort_order = st.sidebar.radio("نوع الفرز:", ["تصاعدي", "تنازلي"], index=0, horizontal=True)
-
-# التبويبات
 if uploaded_file:
     df = pd.read_excel(uploaded_file)
-
-    if sort_col != "بدون":
-        df.sort_values(by=sort_col, ascending=(sort_order == "تصاعدي"), inplace=True)
-
-    tab1, tab2 = st.tabs(["🎯 النتائج المباشرة", "📊 البيانات الخام"])
-
-    with tab1:
-        st.write("سيتم عرض النتائج هنا بعد معالجة البيانات.")
-
-    with tab2:
-        st.dataframe(df)
-
-
-
-# الدفعة الثالثة: حلقة معالجة البيانات وعرض النتائج بشكل متقدم، مع ميزة التصدير وإحصائيات الشريط الجانبي
-
-import streamlit as st
-import pandas as pd
-import numpy as np
-import base64
-import io
-
-# افترض أن الدوال التالية تم تعريفها من الدفعة الأولى:
-# load_models, download_image, detect_field, generate_google_maps_link, generate_whatsapp_share_link
-
-model_yolo, model_ml, scaler = load_models()
-results = []
-
-if uploaded_file:
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-
-    with tab1:
-        for idx, row in df.iterrows():
-            progress_bar.progress((idx + 1) / len(df))
-            status_text.text(f"جاري معالجة الحالة رقم {idx + 1} من {len(df)}...")
-
-            meter_id, lat, lon = row["Subscription"], row["y"], row["x"]
-            breaker, consumption = row["Breaker"], row["consumption"]
-
-            img_path = download_image(lat, lon, meter_id)
-            if not img_path:
-                continue
-
-            conf, img_detected, area = detect_field(img_path, lat, meter_id, model_yolo)
-            if conf is None:
-                continue
-
-            location_link = generate_google_maps_link(lat, lon)
-            whatsapp_link = generate_whatsapp_share_link(meter_id, area, consumption, location_link)
-
-            results.append({
-                "meter_id": meter_id,
-                "confidence": conf,
-                "area": area,
-                "consumption": consumption,
-                "breaker": breaker,
-                "location_link": location_link,
-                "whatsapp_link": whatsapp_link,
-                "img_detected": img_detected
-            })
-
-            with open(img_detected, "rb") as img_file:
-                img_base64 = base64.b64encode(img_file.read()).decode()
-
-            priority_class = "priority-high" if consumption < 10000 else "priority-medium" if consumption < 20000 else "priority-low"
-
-            st.markdown(f"""
-            <div class="card {priority_class}">
-                <img src="data:image/png;base64,{img_base64}"/>
-                <div class="details">
-                    <h4>🔢 العداد: {meter_id}</h4>
-                    <p>📊 نسبة الثقة: {conf}%</p>
-                    <p>📐 المساحة: {area:,} م²</p>
-                    <p>💡 الاستهلاك: {consumption:,} ك.و.س</p>
-                    <p>⚡ القاطع: {breaker} أمبير</p>
-                    <a href="{whatsapp_link}" class="action-btn whatsapp" target="_blank">📤 مشاركة واتساب</a>
-                    <a href="{location_link}" class="action-btn map" target="_blank">📍 عرض الموقع</a>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-
-        status_text.text("✅ اكتملت معالجة جميع الحالات بنجاح!")
-
-        # تصدير النتائج
-        if results:
-            df_results = pd.DataFrame(results)
-            buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
-                df_results.to_excel(writer, index=False)
-            st.sidebar.download_button("📥 تصدير النتائج كملف Excel", data=buffer.getvalue(), file_name="نتائج_الفحص.xlsx")
-
-        # إحصائيات الشريط الجانبي
-        st.sidebar.markdown("### 📊 إحصائيات سريعة")
-        high_priority = sum(df_results["consumption"] < 10000)
-        medium_priority = sum((df_results["consumption"] >= 10000) & (df_results["consumption"] < 20000))
-        low_priority = sum(df_results["consumption"] >= 20000)
-
-        st.sidebar.metric("🔴 حالات قصوى", high_priority)
-        st.sidebar.metric("🟠 حالات متوسطة", medium_priority)
-        st.sidebar.metric("🟢 حالات منخفضة", low_priority)
+    st.dataframe(df.head())  # مثال للعرض الأولي، تابع إضافة باقي الكود للمعالجة والعرض بشكل كامل.
