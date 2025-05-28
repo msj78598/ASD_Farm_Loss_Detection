@@ -94,27 +94,27 @@ def to_excel(df):
     return output.getvalue()
 
 # تصميم CSS
-st.markdown("""
-<style>
-.card {border-radius:10px;box-shadow:0 4px 8px rgba(0,0,0,0.1);padding:20px;margin-bottom:20px;border-left:5px solid;background-color:#f9f9f9;font-family:'Arial',sans-serif;direction:rtl;}
-.card-header {display:flex;justify-content:space-between;align-items:center;padding-bottom:10px;border-bottom:1px solid #eee;}
-.priority-badge {padding:5px 15px;border-radius:20px;color:white;font-weight:bold;}
-.high-badge {background-color:#e74c3c;}
-.medium-badge {background-color:#f39c12;}
-.low-badge {background-color:#27ae60;}
-.card-content {display:flex;gap:20px;margin-top:10px;}
-.card-image {width:160px;height:160px;border-radius:8px;object-fit:cover;}
-.detail-row {display:flex;margin-bottom:5px;}
-.detail-label {font-weight:bold;width:100px;color:#555;}
-.detail-value {flex:1;}
-.card-actions {margin-top:10px;display:flex;gap:10px;}
-.action-btn {padding:6px 12px;text-decoration:none;border-radius:6px;color:white;font-size:14px;}
-.whatsapp-btn {background-color:#25D366;}
-.map-btn {background-color:#4285F4;}
-.priority-high {border-color:#e74c3c;background-color:#ffebee;}
-.priority-medium {border-color:#f39c12;background-color:#fff3e0;}
-.priority-low {border-color:#27ae60;background-color:#e8f5e9;}
-</style>
+st.markdown(f"""
+<div class="card priority-{css_class}">
+    <div class="card-header">
+        <h3>🔢 العداد: {meter_id}</h3>
+        <span class="priority-badge {css_class}-badge">{pri}</span>
+    </div>
+    <div class="card-content">
+        <img class="card-image" src="data:image/png;base64,{img_b64}">
+        <div class="card-details">
+            <div class="detail-row"><span class="detail-label">المكتب:</span><span class="detail-value">{office}</span></div>
+            <div class="detail-row"><span class="detail-label">ثقة الكشف:</span><span class="detail-value">{conf*100:.1f}%</span></div>
+            <div class="detail-row"><span class="detail-label">المساحة:</span><span class="detail-value">{area:,} م²</span></div>
+            <div class="detail-row"><span class="detail-label">الاستهلاك:</span><span class="detail-value">{consumption:,}</span></div>
+            <div class="detail-row"><span class="detail-label">القاطع:</span><span class="detail-value">{breaker}</span></div>
+        </div>
+    </div>
+    <div class="card-actions">
+        <a class="action-btn whatsapp-btn" target="_blank" href="{generate_whatsapp_share_link(meter_id, area, consumption, generate_google_maps_link(lat,lon))}">📱 واتساب</a>
+        <a class="action-btn map-btn" target="_blank" href="{generate_google_maps_link(lat,lon)}">📍 خريطة الموقع</a>
+    </div>
+</div>
 """, unsafe_allow_html=True)
 
 # واجهة المستخدم
