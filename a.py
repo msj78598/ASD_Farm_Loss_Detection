@@ -7,8 +7,8 @@ from PIL import Image, ImageDraw
 import streamlit as st
 import joblib
 from ultralytics import YOLO
-import urllib.parse
 from geopy.distance import geodesic
+from io import BytesIO
 
 # إعدادات عامة
 st.set_page_config(
@@ -25,6 +25,7 @@ OUTPUT_FOLDER = os.path.join(BASE_DIR, "output")
 MODEL_PATH = os.path.join(BASE_DIR, "models", "best.pt")
 ML_MODEL_PATH = os.path.join(BASE_DIR, "models", "isolation_model.joblib")
 SCALER_PATH = os.path.join(BASE_DIR, "models", "isolation_scaler.joblib")
+FORM_PATH = os.path.join(BASE_DIR, "fram.xlsx")
 CALIBRATION_FACTOR = 0.6695
 
 for path in [IMG_DIR, DETECTED_DIR, OUTPUT_FOLDER]:
@@ -48,7 +49,7 @@ def download_image(lat, lon, meter_id):
         "size": "640x640",
         "maptype": "satellite",
         "markers": f"color:red|label:X|{lat},{lon}",
-        "key": "AIzaSyAY7NJrBjS42s6upa9z_qgNLVXESuu366Q"
+        "key": "YOUR_API_KEY"
     }
     response = requests.get(url, params=params, timeout=15)
     if response.status_code == 200:
@@ -72,38 +73,50 @@ def detect_field(img_path, lat, lon, meter_id, model_yolo):
     if corrected_area < 5000:
         return None, None, None, None
 
-    img_center = ((box[1]+box[3])/2, (box[0]+box[2])/2)
-    distance = geodesic((lat, lon), (lat, lon)).meters
+    # حساب مركز الحقل المكتشف
+    img_center_pixel = ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
+    dx = (img_center_pixel[0] - 320) * scale
+    dy = (img_center_pixel[1] - 320) * scale
+
+    # حساب الموقع الجغرافي التقريبي لمركز الحقل
+    field_lat = lat - (dy / 111320)
+    field_lon = lon + (dx / (40075000 * math.cos(math.radians(lat)) / 360))
+
+    distance = geodesic((lat, lon), (field_lat, field_lon)).meters
     if distance > 500:
         return None, None, None, None
 
     draw = ImageDraw.Draw(image)
     draw.rectangle(box.tolist(), outline="green", width=3)
-    draw.line([(320, 320), img_center[::-1]], fill="yellow", width=2, joint="curve")
+    draw.line([(320, 320), img_center_pixel], fill="yellow", width=2, joint="curve")
     out_path = os.path.join(DETECTED_DIR, f"{meter_id}.png")
     image.save(out_path)
     return round(conf * 100, 2), out_path, int(corrected_area), round(distance, 2)
 
 st.title("🌾 نظام اكتشاف حالات الفاقد الكهربائي للفئة الزراعية")
+st.download_button("📥 تحميل نموذج البيانات (fram.xlsx)", open(FORM_PATH, "rb"), file_name="fram.xlsx")
+
 uploaded_file = st.file_uploader("📁 رفع ملف البيانات (Excel)", type=["xlsx"])
 
 if uploaded_file:
     df = pd.read_excel(uploaded_file)
     df.dropna(subset=["Subscription", "Office", "Breaker", "consumption", "x", "y"], inplace=True)
 
-    breaker_filter = st.sidebar.selectbox("عرض حسب سعة القاطع", ["الكل"] + sorted(df["Breaker"].unique().tolist()))
-    min_consumption = st.sidebar.number_input("أقل استهلاك (ك.و.س)", min_value=0, value=0)
+    filter_type = st.sidebar.radio("فلترة حسب", ["الكل", "سعة القاطع", "الاستهلاك"])
 
-    if breaker_filter != "الكل":
+    if filter_type == "سعة القاطع":
+        breaker_filter = st.sidebar.selectbox("اختر سعة القاطع", sorted(df["Breaker"].unique().tolist()))
         df = df[df["Breaker"] == breaker_filter]
-
-    df = df[df["consumption"] >= min_consumption]
+    elif filter_type == "الاستهلاك":
+        min_consumption = st.sidebar.number_input("أقل استهلاك (ك.و.س)", min_value=0, value=0)
+        df = df[df["consumption"] >= min_consumption]
 
     model_yolo, model_ml, scaler = load_models()
 
     progress_bar = st.progress(0)
     progress_text = st.empty()
 
+    results = []
     total = len(df)
 
     for i, (_, row) in enumerate(df.iterrows(), 1):
@@ -123,28 +136,16 @@ if uploaded_file:
         anomaly = model_ml.predict(scaler.transform([[breaker, consumption, lon, lat]]))[0]
         confidence = (breaker < area * 0.006) * 0.4 + (consumption < area * 0.4) * 0.4 + (anomaly == 1) * 0.2
         priority = "قصوى" if confidence >= 0.7 else "متوسطة" if confidence >= 0.4 else "منخفضة"
-        color = {"قصوى": "crimson", "متوسطة": "orange", "منخفضة": "green"}[priority]
 
-        with open(img_detected, "rb") as img_file:
-            encoded_img = base64.b64encode(img_file.read()).decode()
+        results.append([meter_id, confidence, distance, area, consumption, breaker, office, priority])
 
-        map_link = f"https://www.google.com/maps?q={lat},{lon}"
+    results_df = pd.DataFrame(results, columns=["عداد", "نسبة الثقة", "المسافة (م)", "المساحة", "الاستهلاك", "القاطع", "المكتب", "الأولوية"])
 
-        st.markdown(f"""
-        <div style='border:2px solid {color};padding:10px;margin-bottom:10px;border-radius:10px;'>
-            <img src="data:image/png;base64,{encoded_img}" width="300px" style="border-radius:10px;"><br>
-            <h4 style='color:{color};'>عداد: {meter_id} ({priority})</h4>
-            نسبة الثقة: {confidence*100:.2f}%<br>
-            المسافة: {distance} متر<br>
-            المساحة: {area} م²<br>
-            الاستهلاك: {consumption} ك.و.س<br>
-            القاطع: {breaker} أمبير<br>
-            المكتب: {office}<br>
-            <a href="{map_link}" target="_blank">📍 عرض الموقع</a>
-        </div>
-        """, unsafe_allow_html=True)
+    st.dataframe(results_df)
 
-        progress_bar.progress(i / total)
+    output = BytesIO()
+    results_df.to_excel(output, index=False)
+    st.download_button("📥 تنزيل النتائج كملف Excel", data=output.getvalue(), file_name="results.xlsx")
 
     progress_text.text("✅ تم الانتهاء من التحليل.")
 else:
