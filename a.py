@@ -53,7 +53,7 @@ def download_image(lat, lon, meter_id):
         "size": "640x640",
         "maptype": "satellite",
         "markers": f"color:red|label:X|{lat},{lon}",
-        "key": "YOUR_API_KEY"
+        "key": "AIzaSyAY7NJrBjS42s6upa9z_qgNLVXESuu366Q"
     }
 
     response = requests.get(url, params=params, timeout=15)
