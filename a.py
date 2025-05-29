@@ -80,7 +80,7 @@ def detect_field(img_path, lat, lon, meter_id, model_yolo):
     field_lon = lon + (dx / (40075000 * math.cos(math.radians(lat)) / 360))
 
     distance = geodesic((lat, lon), (field_lat, field_lon)).meters
-    if distance > 500:
+    if distance > 400:
         return None, None, None, None
 
     draw = ImageDraw.Draw(image)
