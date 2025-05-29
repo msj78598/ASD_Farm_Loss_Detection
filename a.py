@@ -12,11 +12,9 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 import streamlit as st
 import joblib
-from ultralytics import YOLO
-import urllib.parse
+import torch
 
 # ------------------------- إعدادات عامة -------------------------
-
 st.set_page_config(
     page_title="نظام اكتشاف حالات الفاقد للفئة الزراعية",
     layout="wide",
@@ -24,25 +22,21 @@ st.set_page_config(
 )
 
 # ------------------------- المسارات الرئيسية -------------------------
-
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 IMG_DIR = os.path.join(BASE_DIR, "images")
 DETECTED_DIR = os.path.join(BASE_DIR, "DETECTED_FIELDS")
 OUTPUT_FOLDER = os.path.join(BASE_DIR, "output")
 MODEL_PATH = os.path.join(BASE_DIR, "models", "best.pt")
-ML_MODEL_PATH = os.path.join(BASE_DIR, "models", "isolation_model.joblib")
-SCALER_PATH = os.path.join(BASE_DIR, "models", "isolation_scaler.joblib")
 CALIBRATION_FACTOR = 0.6695
 
 for path in [IMG_DIR, DETECTED_DIR, OUTPUT_FOLDER]:
     os.makedirs(path, exist_ok=True)
 
+# تحميل النموذج بنفس الطريقة السابقة
 @st.cache_resource
-def load_models():
-    model_yolo = YOLO(MODEL_PATH)
-    model_ml = joblib.load(ML_MODEL_PATH)
-    scaler = joblib.load(SCALER_PATH)
-    return model_yolo, model_ml, scaler
+def load_yolo():
+    model_yolo = torch.hub.load('ultralytics/yolov5', 'custom', path=MODEL_PATH, force_reload=True)
+    return model_yolo
 
 def download_image(lat, lon, meter_id):
     img_path = os.path.join(IMG_DIR, f"{meter_id}.png")
@@ -54,39 +48,44 @@ def download_image(lat, lon, meter_id):
         "zoom": 16,
         "size": "640x640",
         "maptype": "satellite",
-        "markers": f"color:red|label:X|{lat},{lon}",
         "key": "YOUR_API_KEY"
     }
-    try:
-        r = requests.get(url, params=params, timeout=15)
-        if r.status_code == 200:
-            with open(img_path, "wb") as f:
-                f.write(r.content)
-            return img_path
-    except:
-        pass
+    r = requests.get(url, params=params)
+    if r.status_code == 200:
+        with open(img_path, "wb") as f:
+            f.write(r.content)
+        return img_path
     return None
 
 def detect_field(img_path, lat, meter_id, model_yolo):
     image = Image.open(img_path).convert("RGB")
-    results = model_yolo.predict(source=image, imgsz=640, conf=0.5)[0]
-    if not results.boxes:
+    results = model_yolo(image)
+    detections = results.xyxy[0].cpu().numpy()
+
+    if len(detections) == 0:
         return None, None, None
-    box = results.boxes[0].xyxy[0].cpu().numpy()
-    conf = float(results.boxes[0].conf.cpu().numpy())
+
+    box = detections[0][:4]
+    conf = detections[0][4]
+
     if conf < 0.5:
         return None, None, None
+
     scale = 156543.03392 * math.cos(math.radians(lat)) / (2 ** 16)
     area = abs(box[2] - box[0]) * abs(box[3] - box[1]) * (scale ** 2)
     corrected_area = area * CALIBRATION_FACTOR
+
     if corrected_area < 5000:
         return None, None, None
+
     draw = ImageDraw.Draw(image)
     draw.rectangle(box.tolist(), outline="green", width=3)
     out_path = os.path.join(DETECTED_DIR, f"{meter_id}.png")
     image.save(out_path)
+
     return round(conf * 100, 2), out_path, int(corrected_area)
 
+# المعادلات والشروط الجديدة (متفق عليها)
 def compute_final_confidence(area, breaker, consumption, yolo_confidence):
     expected_consumption = area * 1
     expected_breaker = area / 500
@@ -119,7 +118,6 @@ def compute_final_confidence(area, breaker, consumption, yolo_confidence):
 # =============================
 # واجهة المستخدم
 # =============================
-
 st.title("🌾 نظام اكتشاف حالات الفاقد الكهربائي للفئة الزراعية")
 uploaded_file = st.file_uploader("📁 رفع ملف البيانات (Excel)", type=["xlsx"])
 
@@ -127,16 +125,18 @@ if uploaded_file:
     df = pd.read_excel(uploaded_file)
     df.columns = df.columns.str.lower().str.strip()
 
-    model_yolo, model_ml, scaler = load_models()
+    model_yolo = load_yolo()
 
     for idx, row in df.iterrows():
         meter_id, lat, lon = row["subscription"], row["y"], row["x"]
-        breaker, consumption, office = row["breaker"], row["consumption"], row["office"]
+        breaker, consumption = row["breaker"], row["consumption"]
+        
         img_path = download_image(lat, lon, meter_id)
         if not img_path:
             continue
+
         yolo_conf, img_detected, area = detect_field(img_path, lat, meter_id, model_yolo)
-        if yolo_conf is None or area is None:
+        if yolo_conf is None:
             continue
 
         final_confidence, priority, color = compute_final_confidence(area, breaker, consumption, yolo_conf)
