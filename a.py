@@ -61,26 +61,28 @@ def detect_field(img_path, lat, lon, meter_id, model_yolo):
     image = Image.open(img_path).convert("RGB")
     results = model_yolo.predict(source=image, imgsz=640, conf=0.5)[0]
     if not results.boxes:
-        return None, None, None
+        return None, None, None, None
     box = results.boxes[0].xyxy[0].cpu().numpy()
     conf = float(results.boxes[0].conf.cpu().numpy())
     if conf < 0.9:
-        return None, None, None
+        return None, None, None, None
     scale = 156543.03392 * math.cos(math.radians(lat)) / (2 ** 16)
     area = abs(box[2] - box[0]) * abs(box[3] - box[1]) * (scale ** 2)
     corrected_area = area * CALIBRATION_FACTOR
     if corrected_area < 5000:
-        return None, None, None
+        return None, None, None, None
 
-    center_lat, center_lon = lat, lon  # افتراض مركز الصورة كإحداثية مؤقتة للحقل
-    if geodesic((lat, lon), (center_lat, center_lon)).meters > 500:
-        return None, None, None
+    img_center = ((box[1]+box[3])/2, (box[0]+box[2])/2)
+    distance = geodesic((lat, lon), (lat, lon)).meters
+    if distance > 500:
+        return None, None, None, None
 
     draw = ImageDraw.Draw(image)
     draw.rectangle(box.tolist(), outline="green", width=3)
+    draw.line([(320, 320), img_center[::-1]], fill="yellow", width=2, joint="curve")
     out_path = os.path.join(DETECTED_DIR, f"{meter_id}.png")
     image.save(out_path)
-    return round(conf * 100, 2), out_path, int(corrected_area)
+    return round(conf * 100, 2), out_path, int(corrected_area), round(distance, 2)
 
 st.title("🌾 نظام اكتشاف حالات الفاقد الكهربائي للفئة الزراعية")
 uploaded_file = st.file_uploader("📁 رفع ملف البيانات (Excel)", type=["xlsx"])
@@ -114,7 +116,7 @@ if uploaded_file:
         if not img_path:
             continue
 
-        conf, img_detected, area = detect_field(img_path, lat, lon, meter_id, model_yolo)
+        conf, img_detected, area, distance = detect_field(img_path, lat, lon, meter_id, model_yolo)
         if conf is None:
             continue
 
@@ -133,6 +135,7 @@ if uploaded_file:
             <img src="data:image/png;base64,{encoded_img}" width="300px" style="border-radius:10px;"><br>
             <h4 style='color:{color};'>عداد: {meter_id} ({priority})</h4>
             نسبة الثقة: {confidence*100:.2f}%<br>
+            المسافة: {distance} متر<br>
             المساحة: {area} م²<br>
             الاستهلاك: {consumption} ك.و.س<br>
             القاطع: {breaker} أمبير<br>
