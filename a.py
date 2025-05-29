@@ -8,6 +8,7 @@ import streamlit as st
 import joblib
 from ultralytics import YOLO
 import urllib.parse
+from geopy.distance import geodesic
 
 # إعدادات عامة
 st.set_page_config(
@@ -47,7 +48,7 @@ def download_image(lat, lon, meter_id):
         "size": "640x640",
         "maptype": "satellite",
         "markers": f"color:red|label:X|{lat},{lon}",
-        "key": "YOUR_API_KEY"
+        "key": "AIzaSyAY7NJrBjS42s6upa9z_qgNLVXESuu366Q"
     }
     response = requests.get(url, params=params, timeout=15)
     if response.status_code == 200:
@@ -56,7 +57,7 @@ def download_image(lat, lon, meter_id):
         return img_path
     return None
 
-def detect_field(img_path, lat, meter_id, model_yolo):
+def detect_field(img_path, lat, lon, meter_id, model_yolo):
     image = Image.open(img_path).convert("RGB")
     results = model_yolo.predict(source=image, imgsz=640, conf=0.5)[0]
     if not results.boxes:
@@ -70,6 +71,11 @@ def detect_field(img_path, lat, meter_id, model_yolo):
     corrected_area = area * CALIBRATION_FACTOR
     if corrected_area < 5000:
         return None, None, None
+
+    center_lat, center_lon = lat, lon  # افتراض مركز الصورة كإحداثية مؤقتة للحقل
+    if geodesic((lat, lon), (center_lat, center_lon)).meters > 500:
+        return None, None, None
+
     draw = ImageDraw.Draw(image)
     draw.rectangle(box.tolist(), outline="green", width=3)
     out_path = os.path.join(DETECTED_DIR, f"{meter_id}.png")
@@ -108,7 +114,7 @@ if uploaded_file:
         if not img_path:
             continue
 
-        conf, img_detected, area = detect_field(img_path, lat, meter_id, model_yolo)
+        conf, img_detected, area = detect_field(img_path, lat, lon, meter_id, model_yolo)
         if conf is None:
             continue
 
