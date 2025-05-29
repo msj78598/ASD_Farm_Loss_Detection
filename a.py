@@ -8,7 +8,6 @@ import streamlit as st
 import joblib
 from ultralytics import YOLO
 from geopy.distance import geodesic
-from io import BytesIO
 
 # إعدادات عامة
 st.set_page_config(
@@ -86,7 +85,7 @@ def detect_field(img_path, lat, lon, meter_id, model_yolo):
 
     draw = ImageDraw.Draw(image)
     draw.rectangle(box.tolist(), outline="green", width=3)
-    draw.line([(320, 320), img_center_pixel], fill="yellow", width=2, joint="curve")
+    draw.line([(320, 320), img_center_pixel], fill="yellow", width=2)
     out_path = os.path.join(DETECTED_DIR, f"{meter_id}.png")
     image.save(out_path)
     return round(conf * 100, 2), out_path, int(corrected_area), round(distance, 2)
@@ -117,7 +116,6 @@ if uploaded_file:
     progress_bar = st.progress(0)
     progress_text = st.empty()
 
-    results = []
     total = len(df)
 
     for i, (_, row) in enumerate(df.iterrows(), 1):
@@ -145,16 +143,18 @@ if uploaded_file:
         map_link = f"https://www.google.com/maps?q={lat},{lon}"
 
         st.markdown(f"""
-        <div style='border:2px solid {color};padding:10px;margin-bottom:10px;border-radius:10px;'>
-            <img src="data:image/png;base64,{encoded_img}" width="300px" style="border-radius:10px;"><br>
-            <h4 style='color:{color};'>عداد: {meter_id} ({priority})</h4>
-            نسبة الثقة: {confidence*100:.2f}%<br>
-            المسافة: {distance} متر<br>
-            المساحة: {area} م²<br>
-            الاستهلاك: {consumption} ك.و.س<br>
-            القاطع: {breaker} أمبير<br>
-            المكتب: {office}<br>
-            <a href="{map_link}" target="_blank">📍 عرض الموقع</a>
+        <div style='border:2px solid {color};padding:10px;border-radius:10px;display:flex;align-items:center;margin-bottom:10px;'>
+            <img src="data:image/png;base64,{encoded_img}" width="300px" style="border-radius:10px;margin-left:15px;">
+            <div style="padding-right:20px;text-align:right;">
+                <h4 style='color:{color};'>عداد: {meter_id} ({priority})</h4>
+                نسبة الثقة: {confidence*100:.2f}%<br>
+                المسافة: {distance} متر<br>
+                المساحة: {area} م²<br>
+                الاستهلاك: {consumption} ك.و.س<br>
+                القاطع: {breaker} أمبير<br>
+                المكتب: {office}<br>
+                <a href="{map_link}" target="_blank">📍 عرض الموقع</a>
+            </div>
         </div>
         """, unsafe_allow_html=True)
 
