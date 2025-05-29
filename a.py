@@ -73,12 +73,10 @@ def detect_field(img_path, lat, lon, meter_id, model_yolo):
     if corrected_area < 5000:
         return None, None, None, None
 
-    # حساب مركز الحقل المكتشف
     img_center_pixel = ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
     dx = (img_center_pixel[0] - 320) * scale
     dy = (img_center_pixel[1] - 320) * scale
 
-    # حساب الموقع الجغرافي التقريبي لمركز الحقل
     field_lat = lat - (dy / 111320)
     field_lon = lon + (dx / (40075000 * math.cos(math.radians(lat)) / 360))
 
@@ -102,14 +100,17 @@ if uploaded_file:
     df = pd.read_excel(uploaded_file)
     df.dropna(subset=["Subscription", "Office", "Breaker", "consumption", "x", "y"], inplace=True)
 
-    filter_type = st.sidebar.radio("فلترة حسب", ["الكل", "سعة القاطع", "الاستهلاك"])
+    breaker_options = ["الكل"] + sorted(df["Breaker"].unique().tolist())
+    breaker_filter = st.sidebar.selectbox("سعة القاطع", breaker_options)
+    sort_order = st.sidebar.radio("ترتيب حسب الاستهلاك", ["بدون ترتيب", "تصاعدي", "تنازلي"])
 
-    if filter_type == "سعة القاطع":
-        breaker_filter = st.sidebar.selectbox("اختر سعة القاطع", sorted(df["Breaker"].unique().tolist()))
+    if breaker_filter != "الكل":
         df = df[df["Breaker"] == breaker_filter]
-    elif filter_type == "الاستهلاك":
-        min_consumption = st.sidebar.number_input("أقل استهلاك (ك.و.س)", min_value=0, value=0)
-        df = df[df["consumption"] >= min_consumption]
+
+    if sort_order == "تصاعدي":
+        df = df.sort_values(by="consumption", ascending=True)
+    elif sort_order == "تنازلي":
+        df = df.sort_values(by="consumption", ascending=False)
 
     model_yolo, model_ml, scaler = load_models()
 
@@ -136,16 +137,28 @@ if uploaded_file:
         anomaly = model_ml.predict(scaler.transform([[breaker, consumption, lon, lat]]))[0]
         confidence = (breaker < area * 0.006) * 0.4 + (consumption < area * 0.4) * 0.4 + (anomaly == 1) * 0.2
         priority = "قصوى" if confidence >= 0.7 else "متوسطة" if confidence >= 0.4 else "منخفضة"
+        color = {"قصوى": "crimson", "متوسطة": "orange", "منخفضة": "green"}[priority]
 
-        results.append([meter_id, confidence, distance, area, consumption, breaker, office, priority])
+        with open(img_detected, "rb") as img_file:
+            encoded_img = base64.b64encode(img_file.read()).decode()
 
-    results_df = pd.DataFrame(results, columns=["عداد", "نسبة الثقة", "المسافة (م)", "المساحة", "الاستهلاك", "القاطع", "المكتب", "الأولوية"])
+        map_link = f"https://www.google.com/maps?q={lat},{lon}"
 
-    st.dataframe(results_df)
+        st.markdown(f"""
+        <div style='border:2px solid {color};padding:10px;margin-bottom:10px;border-radius:10px;'>
+            <img src="data:image/png;base64,{encoded_img}" width="300px" style="border-radius:10px;"><br>
+            <h4 style='color:{color};'>عداد: {meter_id} ({priority})</h4>
+            نسبة الثقة: {confidence*100:.2f}%<br>
+            المسافة: {distance} متر<br>
+            المساحة: {area} م²<br>
+            الاستهلاك: {consumption} ك.و.س<br>
+            القاطع: {breaker} أمبير<br>
+            المكتب: {office}<br>
+            <a href="{map_link}" target="_blank">📍 عرض الموقع</a>
+        </div>
+        """, unsafe_allow_html=True)
 
-    output = BytesIO()
-    results_df.to_excel(output, index=False)
-    st.download_button("📥 تنزيل النتائج كملف Excel", data=output.getvalue(), file_name="results.xlsx")
+        progress_bar.progress(i / total)
 
     progress_text.text("✅ تم الانتهاء من التحليل.")
 else:
