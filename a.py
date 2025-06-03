@@ -24,7 +24,7 @@ OUTPUT_FOLDER = os.path.join(BASE_DIR, "output")
 MODEL_PATH = os.path.join(BASE_DIR, "models", "best.pt")
 ML_MODEL_PATH = os.path.join(BASE_DIR, "models", "isolation_model.joblib")
 SCALER_PATH = os.path.join(BASE_DIR, "models", "isolation_scaler.joblib")
-FORM_PATH = os.path.join(BASE_DIR, "fram.xlsx")
+FORM_PATH = os.path.join(BASE_DIR, "TEMPLATE.xlsx")
 CALIBRATION_FACTOR = 0.6695
 
 for path in [IMG_DIR, DETECTED_DIR, OUTPUT_FOLDER]:
