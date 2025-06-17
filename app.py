@@ -75,6 +75,18 @@ def detect_field(img_path, lat, meter_id, model_yolo):
     conf = float(results.boxes[0].conf.cpu().numpy())
     if conf < 0.9:
         return None, None, None
+        
+    img_center_pixel = ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
+    dx = (img_center_pixel[0] - 320) * scale
+    dy = (img_center_pixel[1] - 320) * scale
+
+    field_lat = lat - (dy / 111320)
+    field_lon = lon + (dx / (40075000 * math.cos(math.radians(lat)) / 360))
+
+    distance = geodesic((lat, lon), (field_lat, field_lon)).meters
+    if distance > 400:
+        return None, None, None, None   
+    
     scale = 156543.03392 * math.cos(math.radians(lat)) / (2 ** 16)
     area = abs(box[2] - box[0]) * abs(box[3] - box[1]) * (scale ** 2)
     corrected_area = area * CALIBRATION_FACTOR
