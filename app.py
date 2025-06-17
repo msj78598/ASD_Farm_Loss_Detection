@@ -81,6 +81,11 @@ def detect_field(img_path, lat, lon, meter_id, model_yolo):
 
     scale = 156543.03392 * math.cos(math.radians(lat)) / (2 ** 16)
 
+    area = abs(box[2] - box[0]) * abs(box[3] - box[1]) * (scale ** 2)
+    corrected_area = area * CALIBRATION_FACTOR
+    if corrected_area < 5000:
+        return None, None, None
+
     img_center_pixel = ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
     dx = (img_center_pixel[0] - 320) * scale
     dy = (img_center_pixel[1] - 320) * scale
@@ -92,16 +97,12 @@ def detect_field(img_path, lat, lon, meter_id, model_yolo):
     if distance > 400:
         return None, None, None
 
-    area = abs(box[2] - box[0]) * abs(box[3] - box[1]) * (scale ** 2)
-    corrected_area = area * CALIBRATION_FACTOR
-    if corrected_area < 5000:
-        return None, None, None
-
     draw = ImageDraw.Draw(image)
     draw.rectangle(box.tolist(), outline="green", width=3)
     out_path = os.path.join(DETECTED_DIR, f"{meter_id}.png")
     image.save(out_path)
     return round(conf * 100, 2), out_path, int(corrected_area)
+
 
 
 def predict_anomaly(row, model_ml, scaler):
