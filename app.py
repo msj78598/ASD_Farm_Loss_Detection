@@ -1,8 +1,3 @@
-# 🔧 نظام اكتشاف حالات الفاقد الكهربائي للفئة الزراعية - نسخة محدثة
-import os
-os.environ["YOLO_VERBOSE"] = "False"
-os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "0"
-
 import math
 import io
 import base64
