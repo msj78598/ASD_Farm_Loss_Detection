@@ -15,8 +15,6 @@ import streamlit as st
 import joblib
 from ultralytics import YOLO
 import urllib.parse
-from geopy.distance import geodesic
-
 
 # ------------------------- إعدادات عامة -------------------------
 st.set_page_config(
@@ -30,7 +28,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 IMG_DIR = os.path.join(BASE_DIR, "images")
 DETECTED_DIR = os.path.join(BASE_DIR, "DETECTED_FIELDS")
 OUTPUT_FOLDER = os.path.join(BASE_DIR, "output")
-MODEL_PATH = os.path.join(BASE_DIR, "models", "best.pt")
+MODEL_PATH = os.path.join(BASE_DIR, "models", "last.pt")
 ML_MODEL_PATH = os.path.join(BASE_DIR, "models", "isolation_model.joblib")
 SCALER_PATH = os.path.join(BASE_DIR, "models", "isolation_scaler.joblib")
 CALIBRATION_FACTOR = 0.6695
@@ -52,7 +50,7 @@ def download_image(lat, lon, meter_id):
     url = "https://maps.googleapis.com/maps/api/staticmap"
     params = {
         "center": f"{lat},{lon}",
-        "zoom": 16,
+        "zoom": 18,
         "size": "640x640",
         "maptype": "satellite",
         "markers": f"color:red|label:X|{lat},{lon}",
@@ -68,42 +66,25 @@ def download_image(lat, lon, meter_id):
         pass
     return None
 
-def detect_field(img_path, lat, lon, meter_id, model_yolo):
+def detect_field(img_path, lat, meter_id, model_yolo):
     image = Image.open(img_path).convert("RGB")
     results = model_yolo.predict(source=image, imgsz=640, conf=0.5)[0]
     if not results.boxes:
         return None, None, None
-
     box = results.boxes[0].xyxy[0].cpu().numpy()
     conf = float(results.boxes[0].conf.cpu().numpy())
     if conf < 0.9:
         return None, None, None
-
     scale = 156543.03392 * math.cos(math.radians(lat)) / (2 ** 16)
-
     area = abs(box[2] - box[0]) * abs(box[3] - box[1]) * (scale ** 2)
     corrected_area = area * CALIBRATION_FACTOR
     if corrected_area < 5000:
         return None, None, None
-
-    img_center_pixel = ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
-    dx = (img_center_pixel[0] - 320) * scale
-    dy = (img_center_pixel[1] - 320) * scale
-
-    field_lat = lat - (dy / 111320)
-    field_lon = lon + (dx / (40075000 * math.cos(math.radians(lat)) / 360))
-
-    distance = geodesic((lat, lon), (field_lat, field_lon)).meters
-    if distance > 400:
-        return None, None, None
-
     draw = ImageDraw.Draw(image)
     draw.rectangle(box.tolist(), outline="green", width=3)
     out_path = os.path.join(DETECTED_DIR, f"{meter_id}.png")
     image.save(out_path)
     return round(conf * 100, 2), out_path, int(corrected_area)
-
-
 
 def predict_anomaly(row, model_ml, scaler):
     X = [[row["breaker"], row["consumption"], row["x"], row["y"]]]
