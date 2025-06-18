@@ -102,8 +102,6 @@ if uploaded_file:
     df = pd.read_excel(uploaded_file)
     df.dropna(subset=["Subscription", "Office", "Breaker", "consumption", "x", "y"], inplace=True)
 
-    st.info(f"🔢 عدد الحالات في الملف: {len(df)}")
-
     breaker_filter = st.sidebar.selectbox("سعة القاطع", ["الكل"] + sorted(df["Breaker"].unique().tolist()))
     sort_order = st.sidebar.radio("ترتيب حسب الاستهلاك", ["بدون ترتيب", "تصاعدي", "تنازلي"])
 
@@ -115,13 +113,16 @@ if uploaded_file:
     elif sort_order == "تنازلي":
         df = df.sort_values(by="consumption", ascending=False)
 
-    if st.button("🚀 بدء التحليل"):
+    st.sidebar.info(f"🔢 عدد الحالات في الملف: {len(df)}")
+
+    if st.sidebar.button("🚀 بدء التحليل"):
         model_yolo, model_ml, scaler = load_models()
-        progress_bar = st.progress(0)
+        progress_bar = st.sidebar.progress(0)
         start_time = time.time()
 
         colors = {"قصوى": "#ff4d4d", "متوسطة": "#ffa500", "منخفضة": "#4CAF50"}
-        html_results = "<html><head><meta charset='UTF-8'></head><body><div style='display:flex;flex-wrap:wrap;'>"
+        results = []
+        detected_count = 0
 
         cols = st.columns(3)
         col_index = 0
@@ -140,32 +141,14 @@ if uploaded_file:
             anomaly = model_ml.predict(scaler.transform([[breaker, consumption, lon, lat]]))[0]
             confidence = (breaker < area * 0.006) * 0.4 + (consumption < area * 0.4) * 0.4 + (anomaly == 1) * 0.2
             priority = "قصوى" if confidence >= 0.7 else "متوسطة" if confidence >= 0.4 else "منخفضة"
-            border_color = colors.get(priority, "#cccccc")
 
-            with open(img_detected, "rb") as img_file:
-                img_b64 = base64.b64encode(img_file.read()).decode()
-
-            cols[col_index % 3].markdown(f"""
-            <div style="border:4px solid {border_color};padding:10px;border-radius:10px;margin:5px;text-align:center;">
-                <img src="data:image/png;base64,{img_b64}" width="250" style="border-radius:8px;"><br>
-                <strong>عداد {meter_id} ({priority})</strong><br>
-                الثقة:{conf}% | المسافة:{distance}م | المساحة:{area}م²<br>
-                الاستهلاك:{consumption} | القاطع:{breaker} | المكتب:{office}<br>
-                <a href="https://maps.google.com?q={lat},{lon}" style="padding:5px;background-color:#4285F4;color:white;border-radius:5px;text-decoration:none;">📍 الموقع</a>
-                <a href="https://wa.me/?text=عداد:{meter_id}%20الموقع:{lat},{lon}" style="padding:5px;background-color:#25D366;color:white;border-radius:5px;text-decoration:none;">📲 واتساب</a>
-            </div>
-            """, unsafe_allow_html=True)
-            col_index += 1
+            results.append([meter_id, priority, confidence, distance, area, consumption, breaker, office, lat, lon])
+            detected_count += 1
             progress_bar.progress(i / len(df))
 
+        results_df = pd.DataFrame(results, columns=["Subscription", "Priority", "Confidence", "Distance", "Area", "Consumption", "Breaker", "Office", "Lat", "Lon"])
+        buffer = BytesIO()
+        results_df.to_excel(buffer, index=False)
+        st.sidebar.download_button("📥 تحميل النتائج Excel", buffer, file_name="results.xlsx")
         duration = time.time() - start_time
-        html_results += "</div></body></html>"
-
-st.download_button(
-    label="📥 تحميل التقرير الكامل HTML",
-    data=html_results.encode('utf-8'),
-    file_name='report.html',
-    mime='text/html'
-)
-
-st.success(f"⏱️ اكتمل التحليل في {round(duration,2)} ثانية")
+        st.sidebar.success(f"📌 تم اكتشاف {detected_count} حالة خلال {round(duration,2)} ثانية")
