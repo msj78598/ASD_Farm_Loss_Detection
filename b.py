@@ -122,8 +122,6 @@ if uploaded_file:
 
         colors = {"قصوى": "#ff4d4d", "متوسطة": "#ffa500", "منخفضة": "#4CAF50"}
         results = []
-        detected_count = 0
-
         cols = st.columns(3)
         col_index = 0
 
@@ -141,14 +139,30 @@ if uploaded_file:
             anomaly = model_ml.predict(scaler.transform([[breaker, consumption, lon, lat]]))[0]
             confidence = (breaker < area * 0.006) * 0.4 + (consumption < area * 0.4) * 0.4 + (anomaly == 1) * 0.2
             priority = "قصوى" if confidence >= 0.7 else "متوسطة" if confidence >= 0.4 else "منخفضة"
+            border_color = colors.get(priority, "#cccccc")
 
             results.append([meter_id, priority, confidence, distance, area, consumption, breaker, office, lat, lon])
-            detected_count += 1
+
+            with open(img_detected, "rb") as img_file:
+                img_b64 = base64.b64encode(img_file.read()).decode()
+
+            cols[col_index % 3].markdown(f"""
+            <div style="border:4px solid {border_color};padding:10px;border-radius:10px;margin:5px;text-align:center;">
+                <img src="data:image/png;base64,{img_b64}" width="250" style="border-radius:8px;"><br>
+                <strong>عداد {meter_id} ({priority})</strong><br>
+                الثقة:{conf}% | المسافة:{distance}م | المساحة:{area}م²<br>
+                الاستهلاك:{consumption} | القاطع:{breaker} | المكتب:{office}<br>
+                <a href="https://maps.google.com?q={lat},{lon}">📍 الموقع</a>
+                <a href="https://wa.me/?text=عداد:{meter_id}%20الموقع:{lat},{lon}">📲 واتساب</a>
+            </div>
+            """, unsafe_allow_html=True)
+            col_index += 1
             progress_bar.progress(i / len(df))
 
-        results_df = pd.DataFrame(results, columns=["Subscription", "Priority", "Confidence", "Distance", "Area", "Consumption", "Breaker", "Office", "Lat", "Lon"])
+        results_df = pd.DataFrame(results)
         buffer = BytesIO()
         results_df.to_excel(buffer, index=False)
+        buffer.seek(0)
         st.sidebar.download_button("📥 تحميل النتائج Excel", buffer, file_name="results.xlsx")
         duration = time.time() - start_time
-        st.sidebar.success(f"📌 تم اكتشاف {detected_count} حالة خلال {round(duration,2)} ثانية")
+        st.sidebar.success(f"⏱️ اكتمل التحليل في {round(duration,2)} ثانية")
