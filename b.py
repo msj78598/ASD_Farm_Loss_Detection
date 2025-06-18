@@ -141,27 +141,25 @@ if uploaded_file:
 
         duration = time.time() - start_time
 
-        results_df = pd.DataFrame(results, columns=["Subscription", "Priority", "Confidence", "Distance", "Area", "Consumption", "Breaker", "Office", "Image", "Lat", "Lon"])
+        results_df = pd.DataFrame(results)
         buffer = BytesIO()
-        results_df.to_excel(buffer, index=False, engine='openpyxl')
+        results_df.to_excel(buffer, index=False)
         buffer.seek(0)
         st.download_button("📥 تحميل النتائج Excel", buffer, file_name="results.xlsx")
 
         colors = {"قصوى": "#ff4d4d", "متوسطة": "#ffa500"}
-        cols = st.columns(2)
+        cols = st.columns(3)
         for idx, res in enumerate(results):
             meter_id, priority, conf_pct, dist, area, consumption, breaker, office, img_detected, lat, lon = res
             with open(img_detected, "rb") as img_file:
                 img_b64 = base64.b64encode(img_file.read()).decode()
-
-            with cols[idx % 2]:
-                st.markdown(f"""
-                <div style="border:3px solid {colors[priority]};padding:10px;border-radius:10px;margin:5px;text-align:center;">
-                    <img src="data:image/png;base64,{img_b64}" width="200" style="border-radius:10px;"><br>
-                    <b>عداد:</b> {meter_id} ({priority})<br>
-                    الثقة: {conf_pct:.2f}% | المسافة: {dist}م | المساحة: {area}م²<br>
-                    [📍 الموقع](https://maps.google.com?q={lat},{lon}) | [📲 واتساب](https://wa.me/?text=عداد:{meter_id}%20الموقع:{lat},{lon})
-                </div>
-                """, unsafe_allow_html=True)
-
-        st.success(f"⏱️ اكتمل التحليل في {round(duration, 2)} ثانية")
+            cols[idx % 3].markdown(f"""
+            <div style="border:4px solid {colors[priority]};border-radius:10px;padding:10px;margin:5px;text-align:center;">
+                <img src="data:image/png;base64,{img_b64}" width="250" style="border-radius:8px;"><br>
+                <h4>عداد {meter_id} ({priority})</h4>
+                الثقة:{conf_pct:.1f}%<br>
+                المساحة:{area}م² | الاستهلاك:{consumption}<br>
+                <a href="https://maps.google.com?q={lat},{lon}">📍 الموقع</a> |
+                <a href="https://wa.me/?text=عداد:{meter_id}%20الموقع:{lat},{lon}">📲 واتساب</a>
+            </div>""", unsafe_allow_html=True)
+        st.success(f"⏱️ اكتمل التحليل في {round(duration,2)} ثانية")
