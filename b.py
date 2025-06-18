@@ -159,7 +159,6 @@ if uploaded_file:
                 <h4>عداد {meter_id} ({priority})</h4>
                 الثقة:{conf_pct:.1f}%<br>
                 المساحة:{area}م² | الاستهلاك:{consumption}<br>
-                <a href="https://maps.google.com?q={lat},{lon}">📍 الموقع</a> |
-                <a href="https://wa.me/?text=عداد:{meter_id}%20الموقع:{lat},{lon}">📲 واتساب</a>
+                <a href="https://wa.me/?text=عداد:{meter_id}%20الموقع:{lat},{lon}" style="padding:6px 12px;background-color:#25D366;color:white;border-radius:5px;text-decoration:none;display:inline-block;margin:4px 2px;">📲 واتساب</a>
             </div>""", unsafe_allow_html=True)
         st.success(f"⏱️ اكتمل التحليل في {round(duration,2)} ثانية")
