@@ -123,6 +123,9 @@ if uploaded_file:
         colors = {"قصوى": "#ff4d4d", "متوسطة": "#ffa500", "منخفضة": "#4CAF50"}
         html_results = "<html><head><meta charset='UTF-8'></head><body><div style='display:flex;flex-wrap:wrap;'>"
 
+        cols = st.columns(3)
+        col_index = 0
+
         for i, (_, row) in enumerate(df.iterrows(), 1):
             meter_id, lat, lon = row["Subscription"], row["y"], row["x"]
             breaker, consumption, office = row["Breaker"], row["consumption"], row["Office"]
@@ -142,24 +145,18 @@ if uploaded_file:
             with open(img_detected, "rb") as img_file:
                 img_b64 = base64.b64encode(img_file.read()).decode()
 
-            st.markdown(f"""
+            cols[col_index % 3].markdown(f"""
             <div style="border:4px solid {border_color};padding:10px;border-radius:10px;margin:5px;text-align:center;">
                 <img src="data:image/png;base64,{img_b64}" width="250" style="border-radius:8px;"><br>
                 <strong>عداد {meter_id} ({priority})</strong><br>
                 الثقة:{conf}% | المسافة:{distance}م | المساحة:{area}م²<br>
                 الاستهلاك:{consumption} | القاطع:{breaker} | المكتب:{office}<br>
-                <a href="https://maps.google.com?q={lat},{lon}" style="padding:5px;background-color:#4285F4;color:white;border-radius:5px;">📍 الموقع</a>
-                <a href="https://wa.me/?text=عداد:{meter_id}%20الموقع:{lat},{lon}" style="padding:5px;background-color:#25D366;color:white;border-radius:5px;">📲 واتساب</a>
+                <a href="https://maps.google.com?q={lat},{lon}" style="padding:5px;background-color:#4285F4;color:white;border-radius:5px;text-decoration:none;">📍 الموقع</a>
+                <a href="https://wa.me/?text=عداد:{meter_id}%20الموقع:{lat},{lon}" style="padding:5px;background-color:#25D366;color:white;border-radius:5px;text-decoration:none;">📲 واتساب</a>
             </div>
             """, unsafe_allow_html=True)
+            col_index += 1
             progress_bar.progress(i / len(df))
 
-        html_results += "</div></body></html>"
-        st.download_button(
-            label="📥 تحميل التقرير الكامل HTML",
-            data=html_results.encode('utf-8'),
-            file_name='report.html',
-            mime='text/html'
-        )
         duration = time.time() - start_time
         st.success(f"⏱️ اكتمل التحليل في {round(duration,2)} ثانية")
