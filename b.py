@@ -14,14 +14,12 @@ sys.modules['cv2'] = __import__('cv2')
 from ultralytics import YOLO
 from geopy.distance import geodesic
 
-# إعدادات عامة
 st.set_page_config(
     page_title="نظام اكتشاف حالات الفاقد للفئة الزراعية",
     layout="wide",
     page_icon="🌾"
 )
 
-# المسارات الرئيسية
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 IMG_DIR = os.path.join(BASE_DIR, "images")
 DETECTED_DIR = os.path.join(BASE_DIR, "DETECTED_FIELDS")
@@ -142,34 +140,30 @@ if uploaded_file:
             progress_bar.progress(i / len(df))
 
         duration = time.time() - start_time
-        results_df = pd.DataFrame(results, columns=["Subscription", "Priority", "Confidence", "Distance", "Area", "Consumption", "Breaker", "Office", "Image", "Lat", "Lon"])
 
+        results_df = pd.DataFrame(results, columns=["Subscription", "Priority", "Confidence", "Distance", "Area", "Consumption", "Breaker", "Office", "Image", "Lat", "Lon"])
         buffer = BytesIO()
         results_df.to_excel(buffer, index=False, engine='openpyxl')
         buffer.seek(0)
 
-        st.download_button("📥 تحميل النتائج كاملة Excel", buffer, file_name="results.xlsx")
+        st.download_button("📥 تحميل النتائج Excel", buffer, file_name="results.xlsx")
 
-        filtered_results = [res for res in results if res[1] in ["قصوى", "متوسطة"]]
         colors = {"قصوى": "#ff4d4d", "متوسطة": "#ffa500"}
-        for res in filtered_results:
+        for res in results:
             meter_id, priority, conf_pct, dist, area, consumption, breaker, office, img_detected, lat, lon = res
-            encoded_img = base64.b64encode(open(img_detected, "rb").read()).decode()
+            with open(img_detected, "rb") as img_file:
+                img_b64 = base64.b64encode(img_file.read()).decode()
+
             st.markdown(f"""
-                <div style="display:flex;border:3px solid {colors[priority]};padding:10px;border-radius:10px;margin-bottom:10px;">
-                    <img src="data:image/png;base64,{encoded_img}" width="200" style="border-radius:10px;margin-left:10px;">
-                    <div style="margin-right:15px;">
-                        <strong>عداد:</strong> {meter_id} ({priority})<br>
-                        <strong>نسبة الثقة:</strong> {conf_pct:.2f}%<br>
-                        <strong>المسافة:</strong> {dist} متر<br>
-                        <strong>المساحة:</strong> {area} م²<br>
-                        <strong>الاستهلاك:</strong> {consumption}<br>
-                        <strong>القاطع:</strong> {breaker}<br>
-                        <strong>المكتب:</strong> {office}<br>
-                        <a href="https://maps.google.com?q={lat},{lon}">📍 Google Maps</a> |
-                        <a href="https://wa.me/?text=عداد:{meter_id}%20الموقع:{lat},{lon}">📲 واتساب</a>
-                    </div>
+            <div style="display:flex;border:3px solid {colors[priority]};padding:10px;border-radius:10px;margin-bottom:10px;align-items:center;">
+                <img src="data:image/png;base64,{img_b64}" width="200" style="border-radius:10px;margin-left:10px;">
+                <div style="margin-right:15px;">
+                    <strong>عداد:</strong> {meter_id} ({priority})<br>
+                    <strong>الثقة:</strong> {conf_pct:.2f}% | <strong>المسافة:</strong> {dist} م | <strong>المساحة:</strong> {area} م²<br>
+                    <a href="https://maps.google.com?q={lat},{lon}" style="padding:5px;background-color:#4285F4;color:white;border-radius:5px;text-decoration:none;">📍 الموقع</a>
+                    <a href="https://wa.me/?text=عداد:{meter_id}%20الموقع:{lat},{lon}" style="padding:5px;background-color:#25D366;color:white;border-radius:5px;text-decoration:none;">📲 واتساب</a>
                 </div>
+            </div>
             """, unsafe_allow_html=True)
 
         st.success(f"⏱️ اكتمل التحليل في {round(duration, 2)} ثانية")
