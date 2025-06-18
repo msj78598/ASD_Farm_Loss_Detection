@@ -155,4 +155,45 @@ if uploaded_file:
             progress_bar.progress(i / len(df))
 
         duration = time.time() - start_time
+        html_results = "<html><head><meta charset='UTF-8'></head><body><div style='display:flex;flex-wrap:wrap;'>"
+
+for res in df.itertuples():
+    meter_id, lat, lon = res.Subscription, res.y, res.x
+    breaker, consumption, office = res.Breaker, res.consumption, res.Office
+    img_path = download_image(lat, lon, meter_id)
+    if not img_path:
+        continue
+
+    conf, img_detected, area, distance = detect_field(img_path, lat, lon, meter_id, model_yolo)
+    if conf is None:
+        continue
+
+    anomaly = model_ml.predict(scaler.transform([[breaker, consumption, lon, lat]]))[0]
+    confidence = (breaker < area * 0.006) * 0.4 + (consumption < area * 0.4) * 0.4 + (anomaly == 1) * 0.2
+    priority = "قصوى" if confidence >= 0.7 else "متوسطة" if confidence >= 0.4 else "منخفضة"
+    border_color = colors.get(priority, "#cccccc")
+
+    with open(img_detected, "rb") as img_file:
+        img_b64 = base64.b64encode(img_file.read()).decode()
+
+    html_results += f"""
+        <div style='border:4px solid {border_color};padding:10px;border-radius:10px;margin:5px;text-align:center;width:30%;'>
+            <img src='data:image/png;base64,{img_b64}' width='250' style='border-radius:8px;'><br>
+            <strong>عداد {meter_id} ({priority})</strong><br>
+            الثقة: {conf}% | المسافة: {distance}م | المساحة: {area}م²<br>
+            الاستهلاك: {consumption} | القاطع: {breaker} | المكتب: {office}<br>
+            <a href='https://maps.google.com?q={lat},{lon}' style='padding:5px;background-color:#4285F4;color:white;border-radius:5px;'>📍 الموقع</a>
+            <a href='https://wa.me/?text=عداد:{meter_id}%20الموقع:{lat},{lon}' style='padding:5px;background-color:#25D366;color:white;border-radius:5px;'>📲 واتساب</a>
+        </div>
+    """
+
+html_results += "</div></body></html>"
+
+st.download_button(
+    label="📥 تحميل التقرير الكامل HTML",
+    data=html_results.encode('utf-8'),
+    file_name='report.html',
+    mime='text/html'
+)
+
         st.success(f"⏱️ اكتمل التحليل في {round(duration,2)} ثانية")
