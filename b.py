@@ -142,20 +142,16 @@ if uploaded_file:
             progress_bar.progress(i / len(df))
 
         duration = time.time() - start_time
+        results_df = pd.DataFrame(results, columns=["Subscription", "Priority", "Confidence", "Distance", "Area", "Consumption", "Breaker", "Office", "Image", "Lat", "Lon"])
 
-        for res in results:
+        buffer = BytesIO()
+        results_df.to_excel(buffer, index=False, engine='openpyxl')
+        buffer.seek(0)
+
+        st.download_button("📥 تحميل النتائج كاملة Excel", buffer, file_name="results.xlsx")
+
+        for res in results[:20]:
             meter_id, priority, conf_pct, dist, area, consumption, breaker, office, img_detected, lat, lon = res
-            with open(img_detected, "rb") as img_file:
-                img_b64 = base64.b64encode(img_file.read()).decode()
-            st.markdown(f"""
-                <div style="border:2px solid #ddd;padding:10px;border-radius:10px;margin:10px">
-                    <img src=\"data:image/png;base64,{img_b64}\" style=\"width:300px;height:auto;border-radius:10px;margin-bottom:10px;">
-                    <h4>🔌 عداد: {meter_id} ({priority})</h4>
-                    📊 الثقة: {conf_pct:.2f}% | المسافة: {dist}م | المساحة: {area}م² | الاستهلاك: {consumption} | المكتب: {office}
-                    <br><br>
-                    <a href=\"https://maps.google.com?q={lat},{lon}\" target=\"_blank\" style=\"padding:6px 12px;background-color:#4CAF50;color:white;border-radius:5px;text-decoration:none;margin-right:5px;\">📍 Google Maps</a>
-                    | <a href=\"https://wa.me/?text=عداد:{meter_id} الموقع:{lat},{lon}\" target=\"_blank\" style=\"padding:6px 12px;background-color:#25D366;color:white;border-radius:5px;text-decoration:none;\">📲 واتساب</a>
-                </div>
-            """, unsafe_allow_html=True)
+            st.image(img_detected, width=300, caption=f"عداد: {meter_id} ({priority})")
 
-        st.success(f"⏱️ اكتمل التحليل في {round(duration, 2)} ثانية")
+        st.success(f"⏱️ اكتمل التحليل في {round(duration, 2)} ثانية - معروضة أول 20 نتيجة فقط")
