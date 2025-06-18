@@ -159,4 +159,13 @@ if uploaded_file:
             progress_bar.progress(i / len(df))
 
         duration = time.time() - start_time
-        st.success(f"⏱️ اكتمل التحليل في {round(duration,2)} ثانية")
+        html_results += "</div></body></html>"
+
+st.download_button(
+    label="📥 تحميل التقرير الكامل HTML",
+    data=html_results.encode('utf-8'),
+    file_name='report.html',
+    mime='text/html'
+)
+
+st.success(f"⏱️ اكتمل التحليل في {round(duration,2)} ثانية")
