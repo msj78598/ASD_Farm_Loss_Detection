@@ -3,6 +3,7 @@ import math
 import base64
 import requests
 import pandas as pd
+import numpy as np
 from PIL import Image, ImageDraw
 import streamlit as st
 import joblib
@@ -112,7 +113,7 @@ if uploaded_file:
 
     if st.button("🚀 بدء التحليل"):
         model_yolo, model_ml, scaler = load_models()
-        results_list = []
+        results = []
         progress_bar = st.progress(0)
 
         for i, (_, row) in enumerate(df.iterrows(), 1):
@@ -121,16 +122,19 @@ if uploaded_file:
             img_path = download_image(lat, lon, meter_id)
             if not img_path:
                 continue
+
             conf, img_detected, area, distance = detect_field(img_path, lat, lon, meter_id, model_yolo)
             if conf is None:
                 continue
+
             anomaly = model_ml.predict(scaler.transform([[breaker, consumption, lon, lat]]))[0]
             confidence = (breaker < area * 0.006) * 0.4 + (consumption < area * 0.4) * 0.4 + (anomaly == 1) * 0.2
             priority = "قصوى" if confidence >= 0.7 else "متوسطة" if confidence >= 0.4 else "منخفضة"
-            results_list.append([meter_id, priority, confidence*100, distance, area, consumption, breaker, office])
 
-            progress_bar.progress(i/len(df))
+            results.append([meter_id, priority, confidence*100, distance, area, consumption, breaker, office])
+            progress_bar.progress(i / len(df))
 
-        results_df = pd.DataFrame(results_list, columns=["Subscription", "Priority", "Confidence", "Distance", "Area", "Consumption", "Breaker", "Office"])
+        results_df = pd.DataFrame(results, columns=["Subscription", "Priority", "Confidence", "Distance", "Area", "Consumption", "Breaker", "Office"])
         st.dataframe(results_df)
-        st.download_button("📥 تحميل النتائج", results_df.to_excel(index=False, engine='openpyxl'), file_name="results.xlsx")
+        excel_file = results_df.to_excel(index=False, engine='openpyxl')
+        st.download_button("📥 تحميل النتائج Excel", data=excel_file, file_name="results.xlsx")
