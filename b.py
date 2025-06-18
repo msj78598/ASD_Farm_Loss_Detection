@@ -1,5 +1,3 @@
-import sys
-sys.modules['cv2'] = __import__('cv2')
 import os
 import math
 import base64
@@ -9,6 +7,8 @@ import numpy as np
 from PIL import Image, ImageDraw
 import streamlit as st
 import joblib
+import sys
+sys.modules['cv2'] = __import__('cv2')  # حل مشكلة استيراد OpenCV
 from ultralytics import YOLO
 from geopy.distance import geodesic
 
