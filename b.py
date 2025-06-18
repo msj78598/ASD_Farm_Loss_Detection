@@ -138,21 +138,24 @@ if uploaded_file:
             confidence = (breaker < area * 0.006) * 0.4 + (consumption < area * 0.4) * 0.4 + (anomaly == 1) * 0.2
             priority = "قصوى" if confidence >= 0.7 else "متوسطة" if confidence >= 0.4 else "منخفضة"
 
-            results.append([meter_id, priority, confidence*100, distance, area, consumption, breaker, office])
+            results.append([meter_id, priority, confidence*100, distance, area, consumption, breaker, office, img_detected, lat, lon])
             progress_bar.progress(i / len(df))
 
         duration = time.time() - start_time
 
         for res in results:
-            meter_id, priority, conf_pct, dist, area, consumption, breaker, office = res
+            meter_id, priority, conf_pct, dist, area, consumption, breaker, office, img_detected, lat, lon = res
+            with open(img_detected, "rb") as img_file:
+                img_b64 = base64.b64encode(img_file.read()).decode()
             st.markdown(f"""
-            <div style="border: 2px solid #ccc; padding: 10px; border-radius: 10px; margin-bottom: 10px;">
-                <h4>🔌 عداد: {meter_id} ({priority})</h4>
-                📊 الثقة: {conf_pct:.2f}% | المسافة: {dist}م | المساحة: {area}م² | الاستهلاك: {consumption}
-                <br>
-                📍 [عرض الموقع](https://maps.google.com?q={lat},{lon}) |
-                📲 [مشاركة واتساب](https://wa.me/?text=عداد:{meter_id}%20الموقع:{lat},{lon})
-            </div>
+                <div style="border:2px solid #ddd;padding:10px;border-radius:10px;margin:10px">
+                    <img src="data:image/png;base64,{img_b64}" style="width:100%;border-radius:10px;margin-bottom:10px;">
+                    <h4>🔌 عداد: {meter_id} ({priority})</h4>
+                    📊 الثقة: {conf_pct:.2f}% | المسافة: {dist}م | المساحة: {area}م² | الاستهلاك: {consumption} | المكتب: {office}
+                    <br><br>
+                    <a href="https://maps.google.com?q={lat},{lon}" target="_blank">📍 Google Maps</a>
+                    | <a href="https://wa.me/?text=عداد:{meter_id} الموقع:{lat},{lon}" target="_blank">📲 واتساب</a>
+                </div>
             """, unsafe_allow_html=True)
 
         st.success(f"⏱️ اكتمل التحليل في {round(duration, 2)} ثانية")
