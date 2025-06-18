@@ -140,7 +140,6 @@ if uploaded_file:
             progress_bar.progress(i / len(df))
 
         duration = time.time() - start_time
-
         results_df = pd.DataFrame(results)
         buffer = BytesIO()
         results_df.to_excel(buffer, index=False)
@@ -154,11 +153,13 @@ if uploaded_file:
             with open(img_detected, "rb") as img_file:
                 img_b64 = base64.b64encode(img_file.read()).decode()
             cols[idx % 3].markdown(f"""
-            <div style="border:4px solid {colors[priority]};border-radius:10px;padding:10px;margin:5px;text-align:center;">
+            <div style="border:4px solid {colors[priority]};padding:10px;border-radius:10px;margin:5px;text-align:center;">
                 <img src="data:image/png;base64,{img_b64}" width="250" style="border-radius:8px;"><br>
-                <h4>عداد {meter_id} ({priority})</h4>
-                الثقة:{conf_pct:.1f}%<br>
-                المساحة:{area}م² | الاستهلاك:{consumption}<br>
-                <a href="https://wa.me/?text=عداد:{meter_id}%20الموقع:{lat},{lon}" style="padding:6px 12px;background-color:#25D366;color:white;border-radius:5px;text-decoration:none;display:inline-block;margin:4px 2px;">📲 واتساب</a>
-            </div>""", unsafe_allow_html=True)
+                <strong>عداد {meter_id} ({priority})</strong><br>
+                الثقة: {conf_pct:.1f}% | المسافة: {dist}م | المساحة: {area}م²<br>
+                الاستهلاك: {consumption} | القاطع: {breaker} | المكتب: {office}<br>
+                <a href="https://maps.google.com?q={lat},{lon}" style="padding:5px;background-color:#4285F4;color:white;border-radius:5px;text-decoration:none;">📍 الموقع</a>
+                <a href="https://wa.me/?text=عداد:{meter_id}%20الموقع:{lat},{lon}" style="padding:5px;background-color:#25D366;color:white;border-radius:5px;text-decoration:none;">📲 واتساب</a>
+            </div>
+            """, unsafe_allow_html=True)
         st.success(f"⏱️ اكتمل التحليل في {round(duration,2)} ثانية")
