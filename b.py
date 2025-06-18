@@ -151,21 +151,25 @@ if uploaded_file:
         st.download_button("📥 تحميل النتائج كاملة Excel", buffer, file_name="results.xlsx")
 
         filtered_results = [res for res in results if res[1] in ["قصوى", "متوسطة"]]
-        for res in filtered_results[:20]:
+        colors = {"قصوى": "#ff4d4d", "متوسطة": "#ffa500"}
+        for res in filtered_results:
             meter_id, priority, conf_pct, dist, area, consumption, breaker, office, img_detected, lat, lon = res
-            col1, col2 = st.columns([1, 2])
-            with col1:
-                st.image(img_detected, width=200)
-            with col2:
-                st.markdown(f"""
-                **عداد:** {meter_id} ({priority})  
-                **نسبة الثقة:** {conf_pct:.2f}%  
-                **المسافة:** {dist} متر  
-                **المساحة:** {area} م²  
-                **الاستهلاك:** {consumption}  
-                **سعة القاطع:** {breaker}  
-                **المكتب:** {office}  
-                [📍 Google Maps](https://maps.google.com?q={lat},{lon}) | [📲 واتساب](https://wa.me/?text=عداد:{meter_id}%20الموقع:{lat},{lon})
-                """, unsafe_allow_html=True)
+            encoded_img = base64.b64encode(open(img_detected, "rb").read()).decode()
+            st.markdown(f"""
+                <div style="display:flex;border:3px solid {colors[priority]};padding:10px;border-radius:10px;margin-bottom:10px;">
+                    <img src="data:image/png;base64,{encoded_img}" width="200" style="border-radius:10px;margin-left:10px;">
+                    <div style="margin-right:15px;">
+                        <strong>عداد:</strong> {meter_id} ({priority})<br>
+                        <strong>نسبة الثقة:</strong> {conf_pct:.2f}%<br>
+                        <strong>المسافة:</strong> {dist} متر<br>
+                        <strong>المساحة:</strong> {area} م²<br>
+                        <strong>الاستهلاك:</strong> {consumption}<br>
+                        <strong>القاطع:</strong> {breaker}<br>
+                        <strong>المكتب:</strong> {office}<br>
+                        <a href="https://maps.google.com?q={lat},{lon}">📍 Google Maps</a> |
+                        <a href="https://wa.me/?text=عداد:{meter_id}%20الموقع:{lat},{lon}">📲 واتساب</a>
+                    </div>
+                </div>
+            """, unsafe_allow_html=True)
 
-        st.success(f"⏱️ اكتمل التحليل في {round(duration, 2)} ثانية - معروضة أول 20 حالة ذات أولوية فقط")
+        st.success(f"⏱️ اكتمل التحليل في {round(duration, 2)} ثانية")
