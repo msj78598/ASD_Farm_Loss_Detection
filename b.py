@@ -145,25 +145,23 @@ if uploaded_file:
         buffer = BytesIO()
         results_df.to_excel(buffer, index=False, engine='openpyxl')
         buffer.seek(0)
-
         st.download_button("📥 تحميل النتائج Excel", buffer, file_name="results.xlsx")
 
         colors = {"قصوى": "#ff4d4d", "متوسطة": "#ffa500"}
-        for res in results:
+        cols = st.columns(2)
+        for idx, res in enumerate(results):
             meter_id, priority, conf_pct, dist, area, consumption, breaker, office, img_detected, lat, lon = res
             with open(img_detected, "rb") as img_file:
                 img_b64 = base64.b64encode(img_file.read()).decode()
 
-            st.markdown(f"""
-            <div style="display:flex;border:3px solid {colors[priority]};padding:10px;border-radius:10px;margin-bottom:10px;align-items:center;">
-                <img src="data:image/png;base64,{img_b64}" width="200" style="border-radius:10px;margin-left:10px;">
-                <div style="margin-right:15px;">
-                    <strong>عداد:</strong> {meter_id} ({priority})<br>
-                    <strong>الثقة:</strong> {conf_pct:.2f}% | <strong>المسافة:</strong> {dist} م | <strong>المساحة:</strong> {area} م²<br>
-                    <a href="https://maps.google.com?q={lat},{lon}" style="padding:5px;background-color:#4285F4;color:white;border-radius:5px;text-decoration:none;">📍 الموقع</a>
-                    <a href="https://wa.me/?text=عداد:{meter_id}%20الموقع:{lat},{lon}" style="padding:5px;background-color:#25D366;color:white;border-radius:5px;text-decoration:none;">📲 واتساب</a>
+            with cols[idx % 2]:
+                st.markdown(f"""
+                <div style="border:3px solid {colors[priority]};padding:10px;border-radius:10px;margin:5px;text-align:center;">
+                    <img src="data:image/png;base64,{img_b64}" width="200" style="border-radius:10px;"><br>
+                    <b>عداد:</b> {meter_id} ({priority})<br>
+                    الثقة: {conf_pct:.2f}% | المسافة: {dist}م | المساحة: {area}م²<br>
+                    [📍 الموقع](https://maps.google.com?q={lat},{lon}) | [📲 واتساب](https://wa.me/?text=عداد:{meter_id}%20الموقع:{lat},{lon})
                 </div>
-            </div>
-            """, unsafe_allow_html=True)
+                """, unsafe_allow_html=True)
 
         st.success(f"⏱️ اكتمل التحليل في {round(duration, 2)} ثانية")
