@@ -8,8 +8,9 @@ from PIL import Image, ImageDraw
 import streamlit as st
 import joblib
 import sys
+import time
 from io import BytesIO
-sys.modules['cv2'] = __import__('cv2')  # حل مشكلة استيراد OpenCV
+sys.modules['cv2'] = __import__('cv2')
 from ultralytics import YOLO
 from geopy.distance import geodesic
 
@@ -52,7 +53,7 @@ def download_image(lat, lon, meter_id):
         "size": "640x640",
         "maptype": "satellite",
         "markers": f"color:red|label:X|{lat},{lon}",
-        "key": "AIzaSyAY7NJrBjS42s6upa9z_qgNLVXESuu366Q"
+        "key": "YOUR_API_KEY"
     }
     response = requests.get(url, params=params, timeout=15)
     if response.status_code == 200:
@@ -103,6 +104,8 @@ if uploaded_file:
     df = pd.read_excel(uploaded_file)
     df.dropna(subset=["Subscription", "Office", "Breaker", "consumption", "x", "y"], inplace=True)
 
+    st.info(f"🔢 عدد الحالات في الملف: {len(df)}")
+
     breaker_filter = st.sidebar.selectbox("سعة القاطع", ["الكل"] + sorted(df["Breaker"].unique().tolist()))
     sort_order = st.sidebar.radio("ترتيب حسب الاستهلاك", ["بدون ترتيب", "تصاعدي", "تنازلي"])
 
@@ -118,6 +121,7 @@ if uploaded_file:
         model_yolo, model_ml, scaler = load_models()
         results = []
         progress_bar = st.progress(0)
+        start_time = time.time()
 
         for i, (_, row) in enumerate(df.iterrows(), 1):
             meter_id, lat, lon = row["Subscription"], row["y"], row["x"]
@@ -137,15 +141,18 @@ if uploaded_file:
             results.append([meter_id, priority, confidence*100, distance, area, consumption, breaker, office])
             progress_bar.progress(i / len(df))
 
-        results_df = pd.DataFrame(results, columns=["Subscription", "Priority", "Confidence", "Distance", "Area", "Consumption", "Breaker", "Office"])
-        buffer = BytesIO()
-        results_df.to_excel(buffer, index=False, engine='openpyxl')
-        buffer.seek(0)
+        duration = time.time() - start_time
 
-        st.dataframe(results_df)
-        st.download_button(
-            "📥 تحميل النتائج Excel",
-            data=buffer,
-            file_name="results.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+        for res in results:
+            meter_id, priority, conf_pct, dist, area, consumption, breaker, office = res
+            st.markdown(f"""
+            <div style="border: 2px solid #ccc; padding: 10px; border-radius: 10px; margin-bottom: 10px;">
+                <h4>🔌 عداد: {meter_id} ({priority})</h4>
+                📊 الثقة: {conf_pct:.2f}% | المسافة: {dist}م | المساحة: {area}م² | الاستهلاك: {consumption}
+                <br>
+                📍 [عرض الموقع](https://maps.google.com?q={lat},{lon}) |
+                📲 [مشاركة واتساب](https://wa.me/?text=عداد:{meter_id}%20الموقع:{lat},{lon})
+            </div>
+            """, unsafe_allow_html=True)
+
+        st.success(f"⏱️ اكتمل التحليل في {round(duration, 2)} ثانية")
