@@ -8,6 +8,7 @@ from PIL import Image, ImageDraw
 import streamlit as st
 import joblib
 import sys
+from io import BytesIO
 sys.modules['cv2'] = __import__('cv2')  # حل مشكلة استيراد OpenCV
 from ultralytics import YOLO
 from geopy.distance import geodesic
@@ -137,6 +138,14 @@ if uploaded_file:
             progress_bar.progress(i / len(df))
 
         results_df = pd.DataFrame(results, columns=["Subscription", "Priority", "Confidence", "Distance", "Area", "Consumption", "Breaker", "Office"])
+        buffer = BytesIO()
+        results_df.to_excel(buffer, index=False, engine='openpyxl')
+        buffer.seek(0)
+
         st.dataframe(results_df)
-        excel_file = results_df.to_excel(index=False, engine='openpyxl')
-        st.download_button("📥 تحميل النتائج Excel", data=excel_file, file_name="results.xlsx")
+        st.download_button(
+            "📥 تحميل النتائج Excel",
+            data=buffer,
+            file_name="results.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
