@@ -51,7 +51,7 @@ def download_image(lat, lon, meter_id):
         "size": "640x640",
         "maptype": "satellite",
         "markers": f"color:red|label:X|{lat},{lon}",
-        "key": "AIzaSyAY7NJrBjS42s6upa9z_qgNLVXESuu366Q"
+        "key": "YOUR_API_KEY"
     }
     response = requests.get(url, params=params, timeout=15)
     if response.status_code == 200:
@@ -164,5 +164,34 @@ if uploaded_file:
         results_df.to_excel(buffer, index=False)
         buffer.seek(0)
         st.sidebar.download_button("📥 تحميل النتائج Excel", buffer, file_name="results.xlsx")
+
+        # زر تحميل التقرير الكامل HTML
+        html_results = "<html><head><meta charset='UTF-8'></head><body><div style='display:flex;flex-wrap:wrap;'>"
+        for res in results:
+            meter_id, priority, confidence, distance, area, consumption, breaker, office, lat, lon = res
+            border_color = colors.get(priority, "#cccccc")
+            img_detected = os.path.join(DETECTED_DIR, f"{meter_id}.png")
+            with open(img_detected, "rb") as img_file:
+                img_b64 = base64.b64encode(img_file.read()).decode()
+
+            html_results += f"""
+            <div style='border:4px solid {border_color};padding:10px;border-radius:10px;margin:5px;text-align:center;'>
+                <img src='data:image/png;base64,{img_b64}' width='250' style='border-radius:8px;'><br>
+                <strong>عداد {meter_id} ({priority})</strong><br>
+                الثقة: {confidence*100:.1f}% | المسافة: {distance}م | المساحة: {area}م²<br>
+                الاستهلاك: {consumption} | القاطع: {breaker} | المكتب: {office}<br>
+                <a href='https://maps.google.com?q={lat},{lon}'>📍 الموقع</a>
+                <a href='https://wa.me/?text=عداد:{meter_id}%20الموقع:{lat},{lon}'>📲 واتساب</a>
+            </div>
+            """
+
+        html_results += "</div></body></html>"
+
+        st.sidebar.download_button(
+            label="📥 تحميل التقرير الكامل HTML",
+            data=html_results.encode('utf-8'),
+            file_name='report.html',
+            mime='text/html'
+        )
         duration = time.time() - start_time
         st.sidebar.success(f"⏱️ اكتمل التحليل في {round(duration,2)} ثانية")
