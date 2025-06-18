@@ -90,7 +90,7 @@ def detect_field(img_path, lat, lon, meter_id, model_yolo):
     image.save(out_path)
     return round(conf * 100, 2), out_path, int(corrected_area), round(distance, 2)
 
-st.title("🌾 نظام اكتشاف حالات الفاقد الكهربائي للفئة الزراعية")
+st.title("🌾111 نظام اكتشاف حالات الفاقد الكهربائي للفئة الزراعية")
 st.download_button("📥 تحميل نموذج البيانات (TEMPLATE.xlsx)", open(FORM_PATH, "rb"), file_name="TEMPLATE.xlsx")
 
 uploaded_file = st.file_uploader("📁 رفع ملف البيانات (Excel)", type=["xlsx"])
