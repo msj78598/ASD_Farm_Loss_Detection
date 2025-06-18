@@ -68,7 +68,7 @@ def detect_field(img_path, lat, lon, meter_id, model_yolo):
         return None, None, None, None
     box = results.boxes[0].xyxy[0].cpu().numpy()
     conf = float(results.boxes[0].conf.cpu().numpy())
-    if conf < 0.9:
+    if conf < 0.6:
         return None, None, None, None
     scale = 156543.03392 * math.cos(math.radians(lat)) / (2 ** 16)
     area = abs(box[2] - box[0]) * abs(box[3] - box[1]) * (scale ** 2)
