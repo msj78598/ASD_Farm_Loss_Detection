@@ -51,7 +51,7 @@ def download_image(lat, lon, meter_id):
         "size": "640x640",
         "maptype": "satellite",
         "markers": f"color:red|label:X|{lat},{lon}",
-        "key": "AIzaSyAY7NJrBjS42s6upa9z_qgNLVXESuu366Q"
+        "key": "YOUR_API_KEY"
     }
     response = requests.get(url, params=params, timeout=15)
     if response.status_code == 200:
@@ -117,9 +117,11 @@ if uploaded_file:
 
     if st.button("🚀 بدء التحليل"):
         model_yolo, model_ml, scaler = load_models()
-        results = []
         progress_bar = st.progress(0)
         start_time = time.time()
+
+        colors = {"قصوى": "#ff4d4d", "متوسطة": "#ffa500", "منخفضة": "#4CAF50"}
+        cols = st.columns(3)
 
         for i, (_, row) in enumerate(df.iterrows(), 1):
             meter_id, lat, lon = row["Subscription"], row["y"], row["x"]
@@ -135,31 +137,22 @@ if uploaded_file:
             anomaly = model_ml.predict(scaler.transform([[breaker, consumption, lon, lat]]))[0]
             confidence = (breaker < area * 0.006) * 0.4 + (consumption < area * 0.4) * 0.4 + (anomaly == 1) * 0.2
             priority = "قصوى" if confidence >= 0.7 else "متوسطة" if confidence >= 0.4 else "منخفضة"
+            border_color = colors.get(priority, "#cccccc")
 
-            results.append([meter_id, priority, confidence*100, distance, area, consumption, breaker, office, img_detected, lat, lon])
+            with open(img_detected, "rb") as img_file:
+                img_b64 = base64.b64encode(img_file.read()).decode()
+
+            cols[i % 3].markdown(f"""
+            <div style="border:4px solid {border_color};padding:10px;border-radius:10px;margin:5px;text-align:center;">
+                <img src="data:image/png;base64,{img_b64}" width="250" style="border-radius:8px;"><br>
+                <strong>عداد {meter_id} ({priority})</strong><br>
+                الثقة:{conf}% | المسافة:{distance}م | المساحة:{area}م²<br>
+                الاستهلاك:{consumption} | القاطع:{breaker} | المكتب:{office}<br>
+                <a href="https://maps.google.com?q={lat},{lon}" style="padding:5px;background-color:#4285F4;color:white;border-radius:5px;">📍 الموقع</a>
+                <a href="https://wa.me/?text=عداد:{meter_id}%20الموقع:{lat},{lon}" style="padding:5px;background-color:#25D366;color:white;border-radius:5px;">📲 واتساب</a>
+            </div>
+            """, unsafe_allow_html=True)
             progress_bar.progress(i / len(df))
 
         duration = time.time() - start_time
-        results_df = pd.DataFrame(results)
-        buffer = BytesIO()
-        results_df.to_excel(buffer, index=False)
-        buffer.seek(0)
-        st.download_button("📥 تحميل النتائج Excel", buffer, file_name="results.xlsx")
-
-        colors = {"قصوى": "#ff4d4d", "متوسطة": "#ffa500"}
-        cols = st.columns(3)
-        for idx, res in enumerate(results):
-            meter_id, priority, conf_pct, dist, area, consumption, breaker, office, img_detected, lat, lon = res
-            with open(img_detected, "rb") as img_file:
-                img_b64 = base64.b64encode(img_file.read()).decode()
-            cols[idx % 3].markdown(f"""
-            <div style="border:4px solid {colors[priority]};padding:10px;border-radius:10px;margin:5px;text-align:center;">
-                <img src="data:image/png;base64,{img_b64}" width="250" style="border-radius:8px;"><br>
-                <strong>عداد {meter_id} ({priority})</strong><br>
-                الثقة: {conf_pct:.1f}% | المسافة: {dist}م | المساحة: {area}م²<br>
-                الاستهلاك: {consumption} | القاطع: {breaker} | المكتب: {office}<br>
-                <a href="https://maps.google.com?q={lat},{lon}" style="padding:5px;background-color:#4285F4;color:white;border-radius:5px;text-decoration:none;">📍 الموقع</a>
-                <a href="https://wa.me/?text=عداد:{meter_id}%20الموقع:{lat},{lon}" style="padding:5px;background-color:#25D366;color:white;border-radius:5px;text-decoration:none;">📲 واتساب</a>
-            </div>
-            """, unsafe_allow_html=True)
         st.success(f"⏱️ اكتمل التحليل في {round(duration,2)} ثانية")
