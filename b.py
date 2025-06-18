@@ -51,7 +51,7 @@ def download_image(lat, lon, meter_id):
         "size": "640x640",
         "maptype": "satellite",
         "markers": f"color:red|label:X|{lat},{lon}",
-        "key": "YOUR_API_KEY"
+        "key": "AIzaSyAY7NJrBjS42s6upa9z_qgNLVXESuu366Q"
     }
     response = requests.get(url, params=params, timeout=15)
     if response.status_code == 200:
@@ -82,8 +82,15 @@ def detect_field(img_path, lat, lon, meter_id, model_yolo):
     field_lat = lat - (dy / 111320)
     field_lon = lon + (dx / (40075000 * math.cos(math.radians(lat)) / 360))
 
-    distance = geodesic((lat, lon), (field_lat, field_lon)).meters
-    if distance > 400:
+    # تعديل لحساب المسافة من حافة الحقل إلى العداد
+    width_px = abs(box[2] - box[0])
+    height_px = abs(box[3] - box[1])
+    radius_px = max(width_px, height_px) / 2
+    radius_m = radius_px * scale
+    center_distance = geodesic((lat, lon), (field_lat, field_lon)).meters
+    edge_distance = max(center_distance - radius_m, 0)
+
+    if edge_distance > 150:
         return None, None, None, None
 
     draw = ImageDraw.Draw(image)
@@ -91,7 +98,7 @@ def detect_field(img_path, lat, lon, meter_id, model_yolo):
     draw.line([(320, 320), img_center_pixel], fill="yellow", width=2)
     out_path = os.path.join(DETECTED_DIR, f"{meter_id}.png")
     image.save(out_path)
-    return round(conf * 100, 2), out_path, int(corrected_area), round(distance, 2)
+    return round(conf * 100, 2), out_path, int(corrected_area), round(edge_distance, 2)
 
 st.title("🌾 نظام اكتشاف حالات الفاقد الكهربائي للفئة الزراعية")
 st.download_button("📥 تحميل نموذج البيانات (TEMPLATE.xlsx)", open(FORM_PATH, "rb"), file_name="TEMPLATE.xlsx")
@@ -165,7 +172,6 @@ if uploaded_file:
         buffer.seek(0)
         st.sidebar.download_button("📥 تحميل النتائج Excel", buffer, file_name="results.xlsx")
 
-        # زر تحميل التقرير الكامل HTML
         html_results = "<html><head><meta charset='UTF-8'></head><body><div style='display:flex;flex-wrap:wrap;'>"
         for res in results:
             meter_id, priority, confidence, distance, area, consumption, breaker, office, lat, lon = res
