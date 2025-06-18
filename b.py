@@ -149,12 +149,12 @@ if uploaded_file:
                 img_b64 = base64.b64encode(img_file.read()).decode()
             st.markdown(f"""
                 <div style="border:2px solid #ddd;padding:10px;border-radius:10px;margin:10px">
-                    <img src="data:image/png;base64,{img_b64}" style="width:100%;border-radius:10px;margin-bottom:10px;">
+                    <img src=\"data:image/png;base64,{img_b64}\" style=\"width:300px;height:auto;border-radius:10px;margin-bottom:10px;">
                     <h4>🔌 عداد: {meter_id} ({priority})</h4>
                     📊 الثقة: {conf_pct:.2f}% | المسافة: {dist}م | المساحة: {area}م² | الاستهلاك: {consumption} | المكتب: {office}
                     <br><br>
-                    <a href="https://maps.google.com?q={lat},{lon}" target="_blank">📍 Google Maps</a>
-                    | <a href="https://wa.me/?text=عداد:{meter_id} الموقع:{lat},{lon}" target="_blank">📲 واتساب</a>
+                    <a href=\"https://maps.google.com?q={lat},{lon}\" target=\"_blank\" style=\"padding:6px 12px;background-color:#4CAF50;color:white;border-radius:5px;text-decoration:none;margin-right:5px;\">📍 Google Maps</a>
+                    | <a href=\"https://wa.me/?text=عداد:{meter_id} الموقع:{lat},{lon}\" target=\"_blank\" style=\"padding:6px 12px;background-color:#25D366;color:white;border-radius:5px;text-decoration:none;\">📲 واتساب</a>
                 </div>
             """, unsafe_allow_html=True)
 
