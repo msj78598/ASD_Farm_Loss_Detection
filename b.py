@@ -150,8 +150,22 @@ if uploaded_file:
 
         st.download_button("📥 تحميل النتائج كاملة Excel", buffer, file_name="results.xlsx")
 
-        for res in results[:20]:
+        filtered_results = [res for res in results if res[1] in ["قصوى", "متوسطة"]]
+        for res in filtered_results[:20]:
             meter_id, priority, conf_pct, dist, area, consumption, breaker, office, img_detected, lat, lon = res
-            st.image(img_detected, width=300, caption=f"عداد: {meter_id} ({priority})")
+            col1, col2 = st.columns([1, 2])
+            with col1:
+                st.image(img_detected, width=200)
+            with col2:
+                st.markdown(f"""
+                **عداد:** {meter_id} ({priority})  
+                **نسبة الثقة:** {conf_pct:.2f}%  
+                **المسافة:** {dist} متر  
+                **المساحة:** {area} م²  
+                **الاستهلاك:** {consumption}  
+                **سعة القاطع:** {breaker}  
+                **المكتب:** {office}  
+                [📍 Google Maps](https://maps.google.com?q={lat},{lon}) | [📲 واتساب](https://wa.me/?text=عداد:{meter_id}%20الموقع:{lat},{lon})
+                """, unsafe_allow_html=True)
 
-        st.success(f"⏱️ اكتمل التحليل في {round(duration, 2)} ثانية - معروضة أول 20 نتيجة فقط")
+        st.success(f"⏱️ اكتمل التحليل في {round(duration, 2)} ثانية - معروضة أول 20 حالة ذات أولوية فقط")
