@@ -8,11 +8,10 @@ import streamlit as st
 import joblib
 from ultralytics import YOLO
 from geopy.distance import geodesic
-from concurrent.futures import ThreadPoolExecutor
 
 # إعدادات عامة
 st.set_page_config(
-    page_title="نظام اكتشاف حالات الفاقد الزراعي",
+    page_title="نظام اكتشاف حالات الفاقد للفئة الزراعية",
     layout="wide",
     page_icon="🌾"
 )
@@ -33,16 +32,15 @@ for path in [IMG_DIR, DETECTED_DIR, OUTPUT_FOLDER]:
 
 @st.cache_resource
 def load_models():
-    return YOLO(MODEL_PATH), joblib.load(ML_MODEL_PATH), joblib.load(SCALER_PATH)
+    model_yolo = YOLO(MODEL_PATH)
+    model_ml = joblib.load(ML_MODEL_PATH)
+    scaler = joblib.load(SCALER_PATH)
+    return model_yolo, model_ml, scaler
 
-model_yolo, model_ml, scaler = load_models()
-
-# تحميل صورة من Google Maps
 def download_image(lat, lon, meter_id):
     img_path = os.path.join(IMG_DIR, f"{meter_id}.png")
     if os.path.exists(img_path):
         return img_path
-
     url = "https://maps.googleapis.com/maps/api/staticmap"
     params = {
         "center": f"{lat},{lon}",
@@ -59,25 +57,20 @@ def download_image(lat, lon, meter_id):
         return img_path
     return None
 
-# اكتشاف الحقول باستخدام YOLO
-@st.cache_data
-def detect_field(img_path, lat, lon, meter_id):
+def detect_field(img_path, lat, lon, meter_id, model_yolo):
     image = Image.open(img_path).convert("RGB")
     results = model_yolo.predict(source=image, imgsz=640, conf=0.5)[0]
     if not results.boxes:
-        return None
-
+        return None, None, None, None
     box = results.boxes[0].xyxy[0].cpu().numpy()
     conf = float(results.boxes[0].conf.cpu().numpy())
     if conf < 0.9:
-        return None
-
+        return None, None, None, None
     scale = 156543.03392 * math.cos(math.radians(lat)) / (2 ** 16)
     area = abs(box[2] - box[0]) * abs(box[3] - box[1]) * (scale ** 2)
     corrected_area = area * CALIBRATION_FACTOR
-
     if corrected_area < 5000:
-        return None
+        return None, None, None, None
 
     img_center_pixel = ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
     dx = (img_center_pixel[0] - 320) * scale
@@ -88,18 +81,17 @@ def detect_field(img_path, lat, lon, meter_id):
 
     distance = geodesic((lat, lon), (field_lat, field_lon)).meters
     if distance > 400:
-        return None
+        return None, None, None, None
 
     draw = ImageDraw.Draw(image)
     draw.rectangle(box.tolist(), outline="green", width=3)
+    draw.line([(320, 320), img_center_pixel], fill="yellow", width=2)
     out_path = os.path.join(DETECTED_DIR, f"{meter_id}.png")
     image.save(out_path)
-
     return round(conf * 100, 2), out_path, int(corrected_area), round(distance, 2)
 
-# تحميل نموذج Excel
-st.title("🌾 نظام اكتشاف حالات الفاقد الزراعي")
-st.download_button("📥 تحميل نموذج البيانات", open(FORM_PATH, "rb"), file_name="TEMPLATE.xlsx")
+st.title("🌾 نظام اكتشاف حالات الفاقد الكهربائي للفئة الزراعية")
+st.download_button("📥 تحميل نموذج البيانات (TEMPLATE.xlsx)", open(FORM_PATH, "rb"), file_name="TEMPLATE.xlsx")
 
 uploaded_file = st.file_uploader("📁 رفع ملف البيانات (Excel)", type=["xlsx"])
 
@@ -107,7 +99,8 @@ if uploaded_file:
     df = pd.read_excel(uploaded_file)
     df.dropna(subset=["Subscription", "Office", "Breaker", "consumption", "x", "y"], inplace=True)
 
-    breaker_filter = st.sidebar.selectbox("سعة القاطع", ["الكل"] + sorted(df["Breaker"].unique()))
+    breaker_options = ["الكل"] + sorted(df["Breaker"].unique().tolist())
+    breaker_filter = st.sidebar.selectbox("سعة القاطع", breaker_options)
     sort_order = st.sidebar.radio("ترتيب حسب الاستهلاك", ["بدون ترتيب", "تصاعدي", "تنازلي"])
 
     if breaker_filter != "الكل":
@@ -118,36 +111,55 @@ if uploaded_file:
     elif sort_order == "تنازلي":
         df = df.sort_values(by="consumption", ascending=False)
 
-    if st.button("🚀 بدء التحليل"):
-        results = []
-        progress_bar = st.progress(0)
+    model_yolo, model_ml, scaler = load_models()
 
-        def process_row(row):
-            meter_id, lat, lon = row["Subscription"], row["y"], row["x"]
-            breaker, consumption, office = row["Breaker"], row["consumption"], row["Office"]
+    progress_bar = st.progress(0)
+    progress_text = st.empty()
 
-            img_path = download_image(lat, lon, meter_id)
-            if not img_path:
-                return
+    total = len(df)
 
-            detection = detect_field(img_path, lat, lon, meter_id)
-            if detection:
-                conf, img_detected, area, distance = detection
-                anomaly = model_ml.predict(scaler.transform([[breaker, consumption, lon, lat]]))[0]
-                priority = "قصوى" if anomaly else "منخفضة"
-                return meter_id, conf, img_detected, area, distance, consumption, breaker, office, priority, lat, lon
+    for i, (_, row) in enumerate(df.iterrows(), 1):
+        meter_id, lat, lon = row["Subscription"], row["y"], row["x"]
+        breaker, consumption, office = row["Breaker"], row["consumption"], row["Office"]
 
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            for i, res in enumerate(executor.map(process_row, [row for _, row in df.iterrows()]), 1):
-                if res:
-                    results.append(res)
-                progress_bar.progress(i / len(df))
+        progress_text.text(f"جاري تحليل العداد رقم {meter_id} ({i}/{total})")
 
-        df_results = pd.DataFrame(results, columns=["Subscription", "Confidence", "Image", "Area", "Distance", "Consumption", "Breaker", "Office", "Priority", "Lat", "Lon"])
-        st.dataframe(df_results)
+        img_path = download_image(lat, lon, meter_id)
+        if not img_path:
+            continue
 
-        df_results.to_excel(os.path.join(OUTPUT_FOLDER, "results.xlsx"), index=False)
-        with open(os.path.join(OUTPUT_FOLDER, "results.xlsx"), "rb") as file:
-            st.download_button("📥 تحميل النتائج Excel", file, "results.xlsx")
+        conf, img_detected, area, distance = detect_field(img_path, lat, lon, meter_id, model_yolo)
+        if conf is None:
+            continue
+
+        anomaly = model_ml.predict(scaler.transform([[breaker, consumption, lon, lat]]))[0]
+        confidence = (breaker < area * 0.006) * 0.4 + (consumption < area * 0.4) * 0.4 + (anomaly == 1) * 0.2
+        priority = "قصوى" if confidence >= 0.7 else "متوسطة" if confidence >= 0.4 else "منخفضة"
+        color = {"قصوى": "crimson", "متوسطة": "orange", "منخفضة": "green"}[priority]
+
+        with open(img_detected, "rb") as img_file:
+            encoded_img = base64.b64encode(img_file.read()).decode()
+
+        map_link = f"https://www.google.com/maps?q={lat},{lon}"
+
+        st.markdown(f"""
+        <div style='border:2px solid {color};padding:10px;border-radius:10px;display:flex;align-items:center;margin-bottom:10px;'>
+            <img src="data:image/png;base64,{encoded_img}" width="300px" style="border-radius:10px;margin-left:15px;">
+            <div style="padding-right:20px;text-align:right;">
+                <h4 style='color:{color};'>عداد: {meter_id} ({priority})</h4>
+                نسبة الثقة: {confidence*100:.2f}%<br>
+                المسافة: {distance} متر<br>
+                المساحة: {area} م²<br>
+                الاستهلاك: {consumption} ك.و.س<br>
+                القاطع: {breaker} أمبير<br>
+                المكتب: {office}<br>
+                <a href="{map_link}" target="_blank">📍 عرض الموقع</a>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        progress_bar.progress(i / total)
+
+    progress_text.text("✅ تم الانتهاء من التحليل.")
 else:
     st.warning("يرجى رفع ملف Excel يحتوي على البيانات المطلوبة.")
