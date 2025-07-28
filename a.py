@@ -163,3 +163,6 @@ if uploaded_file:
     progress_text.text("✅ تم الانتهاء من التحليل.")
 else:
     st.warning("يرجى رفع ملف Excel يحتوي على البيانات المطلوبة.")
+
+    st.markdown("---")
+st.markdown("👨‍💻 **تطوير :** مشهور العباس | 00966553339838 | ")
