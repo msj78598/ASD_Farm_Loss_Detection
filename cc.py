@@ -90,7 +90,7 @@ def detect_field(img_path, lat, lon, meter_id, model_yolo):
     center_distance = geodesic((lat, lon), (field_lat, field_lon)).meters
     edge_distance = max(center_distance - radius_m, 0)
 
-    if edge_distance > 100:
+    if edge_distance > 200:
         return None, None, None, None
 
     draw = ImageDraw.Draw(image)
