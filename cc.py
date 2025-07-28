@@ -47,7 +47,7 @@ def download_image(lat, lon, meter_id):
     url = "https://maps.googleapis.com/maps/api/staticmap"
     params = {
         "center": f"{lat},{lon}",
-        "zoom": 13,
+        "zoom": 14,
         "size": "640x640",
         "maptype": "satellite",
         "markers": f"color:red|label:X|{lat},{lon}",
