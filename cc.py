@@ -82,7 +82,7 @@ def detect_field(img_path, lat, lon, meter_id, model_yolo):
     field_lat = lat - (dy / 111320)
     field_lon = lon + (dx / (40075000 * math.cos(math.radians(lat)) / 360))
 
-    # حساب المسافة من حافة الحقل إلى العداد
+    # تعديل لحساب المسافة من حافة الحقل إلى العداد
     width_px = abs(box[2] - box[0])
     height_px = abs(box[3] - box[1])
     radius_px = max(width_px, height_px) / 2
@@ -111,9 +111,9 @@ if uploaded_file:
 
     breaker_filter = st.sidebar.selectbox("سعة القاطع", ["الكل"] + sorted(df["Breaker"].unique().tolist()))
     sort_order = st.sidebar.radio("ترتيب حسب الاستهلاك", ["بدون ترتيب", "تصاعدي", "تنازلي"])
-
-    # الخيار الجديد لاكتشاف كل الحقول
-    all_fields_mode = st.sidebar.checkbox("🔍 اكتشاف جميع الحقول (تجاهل الشذوذ والاستهلاك)")
+    
+    # خيار تجاوز الشذوذ والمعايير
+    ignore_anomalies = st.sidebar.checkbox("🔍 عرض كل الحقول المكتشفة فقط (تجاهل الشذوذ والاستهلاك)")
 
     if breaker_filter != "الكل":
         df = df[df["Breaker"] == breaker_filter]
@@ -146,21 +146,22 @@ if uploaded_file:
             if conf is None:
                 continue
 
-            if not all_fields_mode:
+            if ignore_anomalies:
+                confidence = 1.0
+                priority = "مكتشف"
+            else:
                 anomaly = model_ml.predict(scaler.transform([[breaker, consumption, lon, lat]]))[0]
                 confidence = (breaker < area * 0.006) * 0.4 + (consumption < area * 0.4) * 0.4 + (anomaly == 1) * 0.2
                 priority = "قصوى" if confidence >= 0.7 else "متوسطة" if confidence >= 0.4 else "منخفضة"
-            else:
-                confidence = 1.0
-                priority = "مكتشف"
 
+            border_color = colors.get(priority, "#cccccc")
             results.append([meter_id, priority, confidence, distance, area, consumption, breaker, office, lat, lon])
 
             with open(img_detected, "rb") as img_file:
                 img_b64 = base64.b64encode(img_file.read()).decode()
 
             cols[col_index % 3].markdown(f"""
-            <div style="border:4px solid {colors.get(priority)};padding:10px;border-radius:10px;margin:5px;text-align:center;">
+            <div style="border:4px solid {border_color};padding:10px;border-radius:10px;margin:5px;text-align:center;">
                 <img src="data:image/png;base64,{img_b64}" width="250" style="border-radius:8px;"><br>
                 <strong>عداد {meter_id} ({priority})</strong><br>
                 الثقة:{conf}% | المسافة:{distance}م | المساحة:{area}م²<br>
@@ -207,3 +208,6 @@ if uploaded_file:
         )
         duration = time.time() - start_time
         st.sidebar.success(f"⏱️ اكتمل التحليل في {round(duration,2)} ثانية")
+
+st.markdown("---")
+st.markdown("👨‍💻 **تطوير :** مشهور العباس | 00966553339838 | ")
