@@ -47,7 +47,7 @@ def download_image(lat, lon, meter_id):
     url = "https://maps.googleapis.com/maps/api/staticmap"
     params = {
         "center": f"{lat},{lon}",
-        "zoom": 13,
+        "zoom": 15,
         "size": "640x640",
         "maptype": "satellite",
         "markers": f"color:red|label:X|{lat},{lon}",
@@ -62,12 +62,12 @@ def download_image(lat, lon, meter_id):
 
 def detect_field(img_path, lat, lon, meter_id, model_yolo):
     image = Image.open(img_path).convert("RGB")
-    results = model_yolo.predict(source=image, imgsz=640, conf=0.5)[0]
+    results = model_yolo.predict(source=image, imgsz=640, conf=0.3)[0]
     if not results.boxes:
         return None, None, None, None
     box = results.boxes[0].xyxy[0].cpu().numpy()
     conf = float(results.boxes[0].conf.cpu().numpy())
-    if conf < 0.9:
+    if conf < 0.5:
         return None, None, None, None
     scale = 156543.03392 * math.cos(math.radians(lat)) / (2 ** 16)
     area = abs(box[2] - box[0]) * abs(box[3] - box[1]) * (scale ** 2)
