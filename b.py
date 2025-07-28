@@ -201,3 +201,6 @@ if uploaded_file:
         )
         duration = time.time() - start_time
         st.sidebar.success(f"⏱️ اكتمل التحليل في {round(duration,2)} ثانية")
+
+st.markdown("---")
+st.markdown("👨‍💻 **تطوير :** مشهور العباس | 00966553339838 | ")
