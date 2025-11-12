@@ -35,7 +35,7 @@ class AppConfig:
     page_icon: str = "🌾"
 
     # ====== إعدادات فلترة “الخضرة” ======
-    green_ratio_min: float = 0.20   # ✅ 50% أقل حد للخضرة لاعتبار الحقل مزروعًا
+    green_ratio_min: float = 0.1   # ✅ 50% أقل حد للخضرة لاعتبار الحقل مزروعًا
     green_dominance: float = 1.2    # يجب أن يكون G أعلى من R و B بهذه النسبة
     green_min_value: int = 80       # حد أدنى لقيمة G لتفادي الظلال والبني
 
