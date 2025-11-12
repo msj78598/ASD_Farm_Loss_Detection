@@ -13,6 +13,7 @@ from io import BytesIO
 sys.modules['cv2'] = __import__('cv2')
 from ultralytics import YOLO
 from geopy.distance import geodesic
+import torch
 
 st.set_page_config(
     page_title="نظام اكتشاف حالات الفاقد للفئة الزراعية",
@@ -30,41 +31,55 @@ SCALER_PATH = os.path.join(BASE_DIR, "models", "isolation_scaler.joblib")
 FORM_PATH = os.path.join(BASE_DIR, "TEMPLATE.xlsx")
 CALIBRATION_FACTOR = 0.6695
 
+# 🔑 ضع هنا الـ Access Token من Copernicus
 COPERNICUS_TOKEN = "ضع_هنا_التوكن_الخاص_بك"
 
 for path in [IMG_DIR, DETECTED_DIR, OUTPUT_FOLDER]:
     os.makedirs(path, exist_ok=True)
 
+# ✅ إصلاح مشكلة UnpicklingError
 def load_models():
-    model_yolo = YOLO(MODEL_PATH)
+    model_yolo = None
+    try:
+        model_yolo = YOLO(MODEL_PATH)
+    except Exception as e:
+        st.warning("⚠️ فشل تحميل نموذج YOLO بالطريقة العادية، سيتم استخدام تحميل آمن.")
+        ckpt = torch.load(MODEL_PATH, map_location="cpu")
+        model_yolo = YOLO()
+        model_yolo.model.load_state_dict(ckpt["model"].state_dict())
+
     model_ml = joblib.load(ML_MODEL_PATH)
     scaler = joblib.load(SCALER_PATH)
     return model_yolo, model_ml, scaler
 
 
-# ⬇️ دالة جديدة لجلب الصور من Copernicus بدل Google Maps
+# ✅ تعديل مصدر الصور إلى Copernicus Sentinel-2
 def download_image(lat, lon, meter_id):
     img_path = os.path.join(IMG_DIR, f"{meter_id}.png")
     if os.path.exists(img_path):
         return img_path
 
-    # نستخدم Sentinel-2 L2A imagery من Copernicus Data Space
-    bbox = f"{lon-0.0008},{lat-0.0008},{lon+0.0008},{lat+0.0008}"  # تقريبًا 80م × 80م
+    bbox = f"{lon-0.0008},{lat-0.0008},{lon+0.0008},{lat+0.0008}"  # تقريبًا 80×80م
     url = "https://sh.dataspace.copernicus.eu/api/v1/process"
 
     payload = {
         "input": {
-            "bounds": {"bbox": [float(x) for x in bbox.split(",")], "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"}},
-            "data": [{"type": "sentinel-2-l2a", "dataFilter": {"mosaickingOrder": "mostRecent"}}],
+            "bounds": {
+                "bbox": [float(x) for x in bbox.split(",")],
+                "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"}
+            },
+            "data": [
+                {"type": "sentinel-2-l2a", "dataFilter": {"mosaickingOrder": "mostRecent"}}
+            ],
         },
-        "output": {"width": 640, "height": 640, "responses": [{"identifier": "default", "format": {"type": "image/png"}}]},
+        "output": {
+            "width": 640, "height": 640,
+            "responses": [{"identifier": "default", "format": {"type": "image/png"}}]
+        },
         "evalscript": """
             //VERSION=3
             function setup() {
-                return {
-                    input: ["B04","B03","B02"],
-                    output: { bands: 3 }
-                };
+                return { input: ["B04","B03","B02"], output: { bands: 3 } };
             }
             function evaluatePixel(sample) {
                 return [sample.B04*2.5, sample.B03*2.5, sample.B02*2.5];
@@ -73,8 +88,8 @@ def download_image(lat, lon, meter_id):
     }
 
     headers = {"Authorization": f"Bearer {COPERNICUS_TOKEN}"}
-
     response = requests.post(url, headers=headers, json=payload, timeout=60)
+
     if response.status_code == 200:
         with open(img_path, "wb") as f:
             f.write(response.content)
@@ -89,39 +104,40 @@ def detect_field(img_path, lat, lon, meter_id, model_yolo):
     results = model_yolo.predict(source=image, imgsz=640, conf=0.1)[0]
     if not results.boxes:
         return None, None, None, None
+
     box = results.boxes[0].xyxy[0].cpu().numpy()
     conf = float(results.boxes[0].conf.cpu().numpy())
     if conf < 0.1:
         return None, None, None, None
+
     scale = 156543.03392 * math.cos(math.radians(lat)) / (2 ** 16)
-    area = abs(box[2] - box[0]) * abs(box[3] - box[1]) * (scale ** 2)
+    area = abs(box[2]-box[0]) * abs(box[3]-box[1]) * (scale**2)
     corrected_area = area * CALIBRATION_FACTOR
     if corrected_area < 1000:
         return None, None, None, None
 
-    img_center_pixel = ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
-    dx = (img_center_pixel[0] - 320) * scale
-    dy = (img_center_pixel[1] - 320) * scale
+    img_center_pixel = ((box[0]+box[2])/2, (box[1]+box[3])/2)
+    dx = (img_center_pixel[0]-320)*scale
+    dy = (img_center_pixel[1]-320)*scale
+    field_lat = lat - (dy/111320)
+    field_lon = lon + (dx/(40075000*math.cos(math.radians(lat))/360))
 
-    field_lat = lat - (dy / 111320)
-    field_lon = lon + (dx / (40075000 * math.cos(math.radians(lat)) / 360))
-
-    width_px = abs(box[2] - box[0])
-    height_px = abs(box[3] - box[1])
-    radius_px = max(width_px, height_px) / 2
-    radius_m = radius_px * scale
+    width_px = abs(box[2]-box[0])
+    height_px = abs(box[3]-box[1])
+    radius_px = max(width_px, height_px)/2
+    radius_m = radius_px*scale
     center_distance = geodesic((lat, lon), (field_lat, field_lon)).meters
-    edge_distance = max(center_distance - radius_m, 0)
+    edge_distance = max(center_distance-radius_m, 0)
 
     if edge_distance > 200:
         return None, None, None, None
 
     draw = ImageDraw.Draw(image)
     draw.rectangle(box.tolist(), outline="green", width=3)
-    draw.line([(320, 320), img_center_pixel], fill="yellow", width=2)
+    draw.line([(320,320), img_center_pixel], fill="yellow", width=2)
     out_path = os.path.join(DETECTED_DIR, f"{meter_id}.png")
     image.save(out_path)
-    return round(conf * 100, 2), out_path, int(corrected_area), round(edge_distance, 2)
+    return round(conf*100,2), out_path, int(corrected_area), round(edge_distance,2)
 
 
 st.title("🌾 نظام اكتشاف حالات الفاقد الكهربائي للفئة الزراعية")
@@ -139,7 +155,6 @@ if uploaded_file:
 
     if breaker_filter != "الكل":
         df = df[df["Breaker"] == breaker_filter]
-
     if sort_order == "تصاعدي":
         df = df.sort_values(by="consumption", ascending=True)
     elif sort_order == "تنازلي":
@@ -152,7 +167,7 @@ if uploaded_file:
         progress_bar = st.sidebar.progress(0)
         start_time = time.time()
 
-        colors = {"قصوى": "#ff4d4d", "متوسطة": "#ffa500", "منخفضة": "#4CAF50", "مكتشف": "#1E90FF"}
+        colors = {"قصوى":"#ff4d4d","متوسطة":"#ffa500","منخفضة":"#4CAF50","مكتشف":"#1E90FF"}
         results = []
         cols = st.columns(3)
         col_index = 0
@@ -173,16 +188,16 @@ if uploaded_file:
                 priority = "مكتشف"
             else:
                 anomaly = model_ml.predict(scaler.transform([[breaker, consumption, lon, lat]]))[0]
-                confidence = (breaker < area * 0.006) * 0.4 + (consumption < area * 0.4) * 0.4 + (anomaly == 1) * 0.2
-                priority = "قصوى" if confidence >= 0.7 else "متوسطة" if confidence >= 0.4 else "منخفضة"
+                confidence = (breaker < area*0.006)*0.4 + (consumption < area*0.4)*0.4 + (anomaly==1)*0.2
+                priority = "قصوى" if confidence>=0.7 else "متوسطة" if confidence>=0.4 else "منخفضة"
 
-            border_color = colors.get(priority, "#cccccc")
+            border_color = colors.get(priority, "#ccc")
             results.append([meter_id, priority, confidence, distance, area, consumption, breaker, office, lat, lon])
 
-            with open(img_detected, "rb") as img_file:
-                img_b64 = base64.b64encode(img_file.read()).decode()
+            with open(img_detected, "rb") as f:
+                img_b64 = base64.b64encode(f.read()).decode()
 
-            cols[col_index % 3].markdown(f"""
+            cols[col_index%3].markdown(f"""
             <div style="border:4px solid {border_color};padding:10px;border-radius:10px;margin:5px;text-align:center;">
                 <img src="data:image/png;base64,{img_b64}" width="250" style="border-radius:8px;"><br>
                 <strong>عداد {meter_id} ({priority})</strong><br>
@@ -192,9 +207,11 @@ if uploaded_file:
                 <a href="https://wa.me/?text=عداد:{meter_id}%20الموقع:{lat},{lon}">📲 واتساب</a>
             </div>
             """, unsafe_allow_html=True)
+
             col_index += 1
             progress_bar.progress(i / len(df))
 
+        # تصدير النتائج
         results_df = pd.DataFrame(results)
         buffer = BytesIO()
         results_df.to_excel(buffer, index=False)
