@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """
 نظام اكتشاف حالات الفاقد للفئة الزراعية (Streamlit + YOLO + Isolation Forest + Copernicus)
-- ثابت على حجم مشهد مناسب لظهور الحقول بوضوح (640px ≈ 6.4 كم ⇒ ~10م/بكسل)
-- فيه خيار معاينة الصور فقط قبل تشغيل النموذج
+- حجم المشهد ثابت ≈ 6.4 كم × 6.4 كم على 640×640 بكسل  ⇒ ~10 م/بكسل (مناسب لظهور الحقول)
+- يجدد Access Token من CDSE أوتوماتيكياً (CLIENT_ID/CLIENT_SECRET في secrets.toml)
+- خيار "عرض الصور فقط" لمعاينة اللقطات قبل تشغيل النموذج
 """
 
 import os, io, time, base64, math
@@ -21,12 +22,10 @@ import joblib
 # ======================= إعدادات ثابتة =======================
 @dataclass
 class AppConfig:
-    # صورة خرج 640x640 تغطي ~6.4 كم (10م/بكسل)
-    map_size: Tuple[int, int] = (640, 640)
-    scene_size_m: int = 6400           # لا منزلق — ثابت
-    zoom_for_metrics: int = 15         # فقط لحساب m/px التقريبي (لا نستخدمه في التنزيل)
+    map_size: Tuple[int, int] = (640, 640)   # أبعاد الصورة الناتجة
+    scene_size_m: int = 6400                 # عرض/ارتفاع المشهد بالأمتار (ثابت)
     calibration_factor: float = 0.6695
-    min_confidence_accept: float = 0.9
+    min_confidence_accept: float = 0.90
     min_area_m2: float = 5000.0
     max_edge_distance_m: float = 100.0
     risk_low: float = 0.40
@@ -41,10 +40,7 @@ class AppConfig:
 
 cfg = AppConfig()
 
-# ======================= أدوات مساعدة =======================
-def meters_per_pixel(lat: float, zoom: int) -> float:
-    return 156543.03392 * math.cos(math.radians(lat)) / (2 ** zoom)
-
+# ======================= أدوات عامة =======================
 def ensure_dirs(*paths):
     for p in paths:
         os.makedirs(p, exist_ok=True)
@@ -64,21 +60,20 @@ def save_results_html(rows: List[List], colors: dict, detected_dir: str) -> byte
     for r in rows:
         meter_id, priority, risk, distance, area, consumption, breaker, office, lat, lon = r
         border = colors.get(priority, "#ccc")
-        img_path = os.path.join(detected_dir, f"{meter_id}.png")
-        if os.path.exists(img_path):
-            with open(img_path, "rb") as f:
+        pth = os.path.join(detected_dir, f"{meter_id}.png")
+        img_tag = ""
+        if os.path.exists(pth):
+            with open(pth, "rb") as f:
                 img_b64 = base64.b64encode(f.read()).decode()
-                img_tag = f"<img src='data:image/png;base64,{img_b64}' width='250' style='border-radius:8px;'>"
-        else:
-            img_tag = ""
+            img_tag = f"<img src='data:image/png;base64,{img_b64}' width='250' style='border-radius:8px;'>"
         html.append(f"""
 <div style='border:4px solid {border};padding:10px;border-radius:10px;margin:6px;text-align:center;'>
-{img_tag}<br>
-<strong>عداد {meter_id} ({priority})</strong><br>
-درجة الخطر: {risk*100:.1f}% | المسافة: {distance:.1f}م | المساحة: {area}م²<br>
-الاستهلاك: {consumption} | القاطع: {breaker} | المكتب: {office}<br>
-<a href='https://maps.google.com?q={lat},{lon}'>📍 الموقع</a>
-<a href='https://wa.me/?text=عداد:{meter_id}%20الموقع:{lat},{lon}'>📲 واتساب</a>
+  {img_tag}<br>
+  <strong>عداد {meter_id} ({priority})</strong><br>
+  خطر: {risk*100:.1f}% | مسافة: {distance:.1f}م | مساحة: {area}م²<br>
+  الاستهلاك: {consumption} | القاطع: {breaker} | المكتب: {office}<br>
+  <a href='https://maps.google.com?q={lat},{lon}'>📍 الموقع</a>
+  <a href='https://wa.me/?text=عداد:{meter_id}%20الموقع:{lat},{lon}'>📲 واتساب</a>
 </div>""")
     html.append("</div></body></html>")
     return "\n".join(html).encode("utf-8")
@@ -110,23 +105,23 @@ class RiskModel:
             pr = "منخفضة"
         return score, pr
 
-# ======================= كشف الحقول =======================
+# ======================= حسابات ومخرجات الكشف =======================
 @dataclass
 class FieldDetection:
     bbox_xyxy: Tuple[float, float, float, float]
     conf: float
-    area_m2: float
+    area_m2: int
     center_latlon: Tuple[float, float]
     edge_distance_m: float
     out_img_path: str
 
 def detect_best_box(image: Image.Image, model: YOLO, min_conf=0.5):
-    results = model.predict(source=image, imgsz=640, conf=min_conf, verbose=False)[0]
-    if not results or not results.boxes or len(results.boxes) == 0:
+    res = model.predict(source=image, imgsz=640, conf=min_conf, verbose=False)[0]
+    if not res or not res.boxes or len(res.boxes) == 0:
         return None, None
-    confs = results.boxes.conf.cpu().numpy()
+    confs = res.boxes.conf.cpu().numpy()
     idx = int(confs.argmax())
-    return results.boxes.xyxy[idx].cpu().numpy(), float(confs[idx])
+    return res.boxes.xyxy[idx].cpu().numpy(), float(confs[idx])
 
 def detect_field(img_path, lat, lon, meter_id, model_yolo,
                  calibration_factor, min_conf_accept,
@@ -136,24 +131,24 @@ def detect_field(img_path, lat, lon, meter_id, model_yolo,
     if box is None or conf < min_conf_accept:
         return None
 
-    # دقة متر/بكسل الحقيقية للصورة: بما أننا نطلب 6.4 كم على 640px ⇒ 10 م/بكسل تقريبًا
-    res = cfg.scene_size_m / float(cfg.map_size[0])
+    # ~10 م/بكسل لأننا نغطي 6.4 كم على 640px
+    m_per_px = cfg.scene_size_m / float(cfg.map_size[0])
 
     w_px, h_px = abs(box[2]-box[0]), abs(box[3]-box[1])
-    area = w_px * h_px * (res**2)
+    area = w_px * h_px * (m_per_px**2)
     corrected = area * calibration_factor
     if corrected < min_area_m2:
         return None
 
-    cx_img, cy_img = image.width/2, image.height/2
+    cx, cy = image.width/2, image.height/2
     bx, by = (box[0]+box[2])/2, (box[1]+box[3])/2
-    dx_m, dy_m = (bx-cx_img)*res, (by-cy_img)*res
+    dx_m, dy_m = (bx-cx)*m_per_px, (by-cy)*m_per_px
     dlat = -(dy_m / 111320.0)
     dlon = dx_m / (40075000.0 * math.cos(math.radians(lat)) / 360.0)
     flat, flon = lat+dlat, lon+dlon
 
     radius_px = max(w_px, h_px)/2
-    radius_m = radius_px * res
+    radius_m = radius_px * m_per_px
     dist = geodesic((lat, lon), (flat, flon)).meters
     edge = max(dist - radius_m, 0)
     if edge > max_edge_distance_m:
@@ -161,13 +156,39 @@ def detect_field(img_path, lat, lon, meter_id, model_yolo,
 
     draw = ImageDraw.Draw(image)
     draw.rectangle(box.tolist(), outline="green", width=3)
-    draw.line([(cx_img, cy_img), (bx, by)], fill="yellow", width=2)
+    draw.line([(cx, cy), (bx, by)], fill="yellow", width=2)
     os.makedirs(detected_dir, exist_ok=True)
     out_path = os.path.join(detected_dir, f"{meter_id}.png")
     image.save(out_path)
+
     return FieldDetection(tuple(box.tolist()), conf, int(corrected), (flat, flon), round(edge,2), out_path)
 
-# ======================= BBOX و تنزيل الصورة من Copernicus =======================
+# ======================= CDSE Token & Download =======================
+TOKEN_URL = "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token"
+
+def get_cdse_token():
+    """يجلب Access Token عبر client_credentials ويُخزنه مؤقتاً مع وقت الانتهاء."""
+    tok = st.session_state.get("_cdse_token")
+    exp = st.session_state.get("_cdse_token_exp", 0)
+    if tok and time.time() < exp - 60:  # صلاحية متبقية > 60 ثانية
+        return tok
+
+    cid = st.secrets.get("CDSE_CLIENT_ID")
+    csec = st.secrets.get("CDSE_CLIENT_SECRET")
+    if not cid or not csec:
+        raise RuntimeError("CDSE_CLIENT_ID / CDSE_CLIENT_SECRET غير موجودة في secrets.toml")
+
+    data = {"grant_type":"client_credentials","client_id":cid,"client_secret":csec}
+    r = requests.post(TOKEN_URL, data=data, timeout=20)
+    if r.status_code != 200:
+        raise RuntimeError(f"CDSE token error {r.status_code}: {r.text[:200]}")
+    js = r.json()
+    access = js["access_token"]
+    expires = int(js.get("expires_in", 3600))
+    st.session_state["_cdse_token"] = access
+    st.session_state["_cdse_token_exp"] = time.time() + expires
+    return access
+
 def bbox_from_meters(lat: float, lon: float, size_m: float):
     half = size_m / 2.0
     dlat = half / 111320.0
@@ -177,69 +198,53 @@ def bbox_from_meters(lat: float, lon: float, size_m: float):
 @st.cache_data(show_spinner=False, ttl=24*3600)
 def download_image(lat, lon, meter_id, timeout=30):
     """
-    ينـزّل مشهد Sentinel-2 True Color بحجم ثابت ≈ 6.4 كم × 6.4 كم على 640px ⇒ ~10م/بكسل
+    ينـزّل مشهد Sentinel-2 True Color بحجم ثابت ≈ 6.4 كم × 6.4 كم على 640px  ⇒ ~10م/بكسل
     """
     img_path = os.path.join(cfg.images_dir, f"{meter_id}.png")
     if os.path.exists(img_path):
         return img_path
 
-    token = st.secrets.get("COPERNICUS_TOKEN", "")
-    if not token:
-        st.error("❌ لم يتم ضبط COPERNICUS_TOKEN في secrets.toml")
-        return None
-
-    bbox = bbox_from_meters(lat, lon, cfg.scene_size_m)
-
-    url = "https://sh.dataspace.copernicus.eu/api/v1/process"
-    payload = {
-        "input": {
-            "bounds": {
-                "bbox": bbox,
-                "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"}
+    def _request(token):
+        bbox = bbox_from_meters(lat, lon, cfg.scene_size_m)
+        url = "https://sh.dataspace.copernicus.eu/api/v1/process"
+        payload = {
+            "input": {
+                "bounds": {"bbox": bbox, "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"}},
+                "data": [{
+                    "type": "sentinel-2-l2a",
+                    "dataFilter": {"maxCloudCoverage": 60, "mosaickingOrder": "mostRecent"},
+                    "processing": {"upsampling": "NEAREST", "downsampling": "NEAREST"}
+                }]
             },
-            "data": [{
-                "type": "sentinel-2-l2a",
-                "dataFilter": {
-                    "maxCloudCoverage": 60,
-                    "mosaickingOrder": "mostRecent"
-                },
-                "processing": {
-                    "upsampling": "NEAREST",
-                    "downsampling": "NEAREST"
-                }
-            }]
-        },
-        "output": {
-            "width": cfg.map_size[0],
-            "height": cfg.map_size[1],
-            "responses": [{"identifier": "default", "format": {"type": "image/png"}}]
-        },
-        "evalscript": """
+            "output": {
+                "width": cfg.map_size[0],
+                "height": cfg.map_size[1],
+                "responses": [{"identifier":"default","format":{"type":"image/png"}}]
+            },
+            "evalscript": """
 //VERSION=3
-function setup() {
-  return {input: ["B04","B03","B02"], output: {bands: 3}};
-}
-function evaluatePixel(s) {
-  // True color مع تعزيز بسيط للسطوع
-  return [s.B04*3.0, s.B03*3.0, s.B02*3.0];
-}
+function setup(){return {input:["B04","B03","B02"],output:{bands:3}}}
+function evaluatePixel(s){return [s.B04*3.0, s.B03*3.0, s.B02*3.0]}
 """
-    }
-    headers = {"Authorization": f"Bearer {token}"}
-    try:
-        r = requests.post(url, headers=headers, json=payload, timeout=timeout)
-        if r.status_code == 200:
-            with open(img_path, "wb") as f:
-                f.write(r.content)
-            return img_path
-        else:
-            st.warning(f"⚠️ Copernicus status {r.status_code} للعداد {meter_id}: {r.text[:180]}")
-            return None
-    except Exception as e:
-        st.error(f"❌ فشل تحميل صورة من Copernicus: {e}")
+        }
+        headers = {"Authorization": f"Bearer {token}"}
+        return requests.post(url, headers=headers, json=payload, timeout=timeout)
+
+    token = get_cdse_token()
+    r = _request(token)
+    if r.status_code == 401:          # انتهت صلاحية التوكن أثناء التشغيل
+        token = get_cdse_token()      # يجدد
+        r = _request(token)
+
+    if r.status_code == 200:
+        with open(img_path, "wb") as f:
+            f.write(r.content)
+        return img_path
+    else:
+        st.warning(f"Copernicus status {r.status_code} للعداد {meter_id}: {r.text[:200]}")
         return None
 
-# ======================= الواجهة =======================
+# ======================= واجهة Streamlit =======================
 st.set_page_config(page_title=cfg.page_title, page_icon=cfg.page_icon, layout="wide")
 ensure_dirs(cfg.images_dir, cfg.detected_dir, cfg.output_dir, cfg.models_dir)
 
@@ -257,56 +262,40 @@ if uploaded:
 
     breaker_filter = st.sidebar.selectbox("سعة القاطع", ["الكل"] + sorted(df["Breaker"].unique().tolist()))
     sort_order = st.sidebar.radio("ترتيب حسب الاستهلاك", ["بدون ترتيب", "تصاعدي", "تنازلي"])
-    if breaker_filter != "الكل":
-        df = df[df["Breaker"] == breaker_filter]
-    if sort_order == "تصاعدي":
-        df = df.sort_values(by="consumption", ascending=True)
-    elif sort_order == "تنازلي":
-        df = df.sort_values(by="consumption", ascending=False)
+    if breaker_filter != "الكل": df = df[df["Breaker"] == breaker_filter]
+    if sort_order == "تصاعدي": df = df.sort_values(by="consumption", ascending=True)
+    elif sort_order == "تنازلي": df = df.sort_values(by="consumption", ascending=False)
 
-    # خيار معاينة الصور فقط
+    # معاينة صور فقط
     preview_only = st.sidebar.checkbox("🖼️ عرض الصور فقط (بدون تشغيل النموذج)")
-    btn_preview = st.sidebar.button("📥 تنزيل/عرض الصور")
-
-    # --- معاينة الصور فقط ---
-    if btn_preview:
+    if st.sidebar.button("📥 تنزيل/عرض الصور"):
         progress = st.sidebar.progress(0)
         cols = st.columns(4)
-        shown = 0
-        n = len(df)
-        t0 = time.time()
-
+        shown, n, t0 = 0, len(df), time.time()
         for i, (_, row) in enumerate(df.iterrows(), 1):
-            meter = str(row["Subscription"])
-            lat, lon = float(row["y"]), float(row["x"])
-            img_path = download_image(lat, lon, meter)
-            if not img_path:
-                progress.progress(i / max(n, 1))
-                continue
-            with open(img_path, "rb") as f:
-                b64 = base64.b64encode(f.read()).decode()
-            cols[shown % 4].markdown(
-                f"""
-                <div style="border:1px solid #ddd;border-radius:8px;padding:6px;margin:6px;text-align:center">
-                  <img src="data:image/png;base64,{b64}" width="230" style="border-radius:6px"><br>
-                  <small>عداد {meter}<br>Lat {lat:.6f}, Lon {lon:.6f}</small>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            shown += 1
-            progress.progress(i / max(n, 1))
+            meter = str(row["Subscription"]); lat, lon = float(row["y"]), float(row["x"])
+            p = download_image(lat, lon, meter)
+            if p:
+                with open(p, "rb") as f: b64 = base64.b64encode(f.read()).decode()
+                cols[shown % 4].markdown(f"""
+<div style="border:1px solid #ddd;border-radius:8px;padding:6px;margin:6px;text-align:center">
+  <img src="data:image/png;base64,{b64}" width="230" style="border-radius:6px"><br>
+  <small>عداد {meter}<br>Lat {lat:.6f}, Lon {lon:.6f}</small>
+</div>""", unsafe_allow_html=True)
+                shown += 1
+            progress.progress(i / max(n,1))
+        st.sidebar.success(f"✅ تم عرض {shown} صورة في {time.time()-t0:.1f} ثانية")
+        st.stop()
 
-        st.sidebar.success(f"✅ تم عرض {shown} صورة خلال {time.time()-t0:.1f} ثانية")
-        st.stop()  # لا نكمل للتشغيل
-
-    # --- التشغيل الكامل ---
+    # تشغيل التحليل
     if st.sidebar.button("🚀 بدء التحليل"):
         model_yolo = load_yolo(MODEL_PATH)
         risk_model = RiskModel(ML_MODEL_PATH, SCALER_PATH, cfg.risk_low, cfg.risk_high)
+
         progress = st.sidebar.progress(0)
         results, cols, col_i = [], st.columns(3), 0
         t0 = time.time()
+        n = len(df)
 
         for i, (_, row) in enumerate(df.iterrows(), 1):
             try:
@@ -314,39 +303,36 @@ if uploaded:
                 lat, lon = float(row["y"]), float(row["x"])
                 br, cons, off = float(row["Breaker"]), float(row["consumption"]), str(row["Office"])
 
-                img = download_image(lat, lon, meter)
-                if not img:
-                    progress.progress(i / len(df))
-                    continue
+                img_path = download_image(lat, lon, meter)
+                if not img_path:
+                    progress.progress(i / n); continue
 
                 det = detect_field(
-                    img, lat, lon, meter, model_yolo,
+                    img_path, lat, lon, meter, model_yolo,
                     cfg.calibration_factor, cfg.min_confidence_accept,
                     cfg.min_area_m2, cfg.max_edge_distance_m, cfg.detected_dir
                 )
                 if det is None:
-                    progress.progress(i / len(df))
-                    continue
+                    progress.progress(i / n); continue
 
                 score, pr = risk_model.compute(br, cons, lon, lat, det.area_m2)
                 results.append([meter, pr, score, det.edge_distance_m, det.area_m2, cons, br, off, lat, lon])
 
-                with open(det.out_img_path, "rb") as f:
-                    img64 = base64.b64encode(f.read()).decode()
+                with open(det.out_img_path, "rb") as f: img64 = base64.b64encode(f.read()).decode()
                 cols[col_i % 3].markdown(f"""
-                <div style="border:4px solid {colors.get(pr,'#ccc')};padding:10px;border-radius:12px;margin:6px;text-align:center;">
-                  <img src="data:image/png;base64,{img64}" width="260"><br>
-                  <strong>عداد {meter} ({pr})</strong><br>
-                  خطر:{score*100:.1f}% | مسافة:{det.edge_distance_m:.1f}م | مساحة:{det.area_m2}م²<br>
-                  استهلاك:{cons} | قاطع:{br} | مكتب:{off}<br>
-                  <a href="https://maps.google.com?q={lat},{lon}">📍 الموقع</a>
-                </div>""", unsafe_allow_html=True)
+<div style="border:4px solid {colors.get(pr,'#ccc')};padding:10px;border-radius:12px;margin:6px;text-align:center;">
+  <img src="data:image/png;base64,{img64}" width="260"><br>
+  <strong>عداد {meter} ({pr})</strong><br>
+  خطر:{score*100:.1f}% | مسافة:{det.edge_distance_m:.1f}م | مساحة:{det.area_m2}م²<br>
+  استهلاك:{cons} | قاطع:{br} | مكتب:{off}<br>
+  <a href="https://maps.google.com?q={lat},{lon}">📍 الموقع</a>
+</div>""", unsafe_allow_html=True)
                 col_i += 1
-                progress.progress(i / len(df))
+                progress.progress(i / n)
 
             except Exception as e:
                 st.warning(f"⚠️ خطأ في العداد {row.get('Subscription','?')}: {e}")
-                progress.progress(i / len(df))
+                progress.progress(i / n)
                 continue
 
         if results:
@@ -354,12 +340,10 @@ if uploaded:
                 "Subscription","priority","risk_score","edge_distance_m","area_m2",
                 "consumption","breaker","office","lat","lon"
             ])
-            excel_bytes = save_results_excel(res_df)
-            html_bytes = save_results_html(results, colors, cfg.detected_dir)
-            st.sidebar.download_button("📥 نتائج Excel", data=excel_bytes, file_name="results.xlsx")
-            st.sidebar.download_button("📥 تقرير HTML", data=html_bytes, file_name="report.html", mime="text/html")
-
-        st.sidebar.success(f"⏱️ اكتمل التحليل خلال {round(time.time()-t0,1)} ثانية")
+            st.sidebar.download_button("📥 نتائج Excel", data=save_results_excel(res_df), file_name="results.xlsx")
+            st.sidebar.download_button("📥 تقرير HTML", data=save_results_html(results, colors, cfg.detected_dir),
+                                       file_name="report.html", mime="text/html")
+        st.sidebar.success(f"⏱️ اكتمل التحليل في {round(time.time()-t0,1)} ثانية")
 
 st.markdown("---")
 st.markdown("👨‍💻 **تطوير :** مشهور العباس | 00966553339838 | ")
