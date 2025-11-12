@@ -14,12 +14,11 @@ sys.modules['cv2'] = __import__('cv2')
 from ultralytics import YOLO
 from geopy.distance import geodesic
 
-# === إضافات من أجل Copernicus / Sentinel-2 ===
+# ===== [إضافات مطلوبة لمصدر الصور الجديد فقط] =====
 from datetime import datetime, timedelta
 from pystac_client import Client
 from odc.stac import stac_load
-
-# ==============================================
+# ====================================================
 
 st.set_page_config(
     page_title="نظام اكتشاف حالات الفاقد للفئة الزراعية",
@@ -40,39 +39,6 @@ CALIBRATION_FACTOR = 0.6695
 for path in [IMG_DIR, DETECTED_DIR, OUTPUT_FOLDER]:
     os.makedirs(path, exist_ok=True)
 
-CDSE_STAC_URL = "https://catalogue.dataspace.copernicus.eu/stac"
-TOKEN_URL = "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token"
-
-# -------- الحصول على توكن تلقائياً (اختياري) ----------
-_token_cache = {"access_token": None, "exp": 0.0}
-
-def get_cdse_token():
-    """يجلب/يجدّد Access Token من CDSE باستعمال CLIENT_ID/SECRET أو يرجع CDSE_TOKEN إن كان موجوداً."""
-    # إن كان لديك توكن جاهز في البيئة نستخدمه
-    tok = os.getenv("CDSE_TOKEN")
-    if tok:
-        return tok
-    # غير ذلك نجلبه عبر OAuth Client Credentials
-    if _token_cache["access_token"] and time.time() < _token_cache["exp"] - 60:
-        return _token_cache["access_token"]
-    client_id = os.getenv("CDSE_CLIENT_ID")
-    client_secret = os.getenv("CDSE_CLIENT_SECRET")
-    if not client_id or not client_secret:
-        raise RuntimeError("يرجى ضبط CDSE_CLIENT_ID و CDSE_CLIENT_SECRET أو CDSE_TOKEN في متغيرات البيئة.")
-    resp = requests.post(
-        TOKEN_URL,
-        data={"grant_type": "client_credentials",
-              "client_id": client_id,
-              "client_secret": client_secret},
-        timeout=30,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    _token_cache["access_token"] = data["access_token"]
-    _token_cache["exp"] = time.time() + int(data.get("expires_in", 3600))
-    return _token_cache["access_token"]
-# ------------------------------------------------------
-
 @st.cache_resource
 def load_models():
     model_yolo = YOLO(MODEL_PATH)
@@ -80,66 +46,81 @@ def load_models():
     scaler = joblib.load(SCALER_PATH)
     return model_yolo, model_ml, scaler
 
-# ====== الدالة الجديدة: جلب صورة Sentinel-2 بدل Google ======
-def download_image(lat, lon, meter_id,
-                   days_back=30, max_cloud=10,
-                   out_px=640, emulate_zoom=16):
+# ============== التعديل الوحيد: استبدال مصدر الصورة ==============
+CDSE_STAC_URL = "https://catalogue.dataspace.copernicus.eu/stac"
+TOKEN_URL = "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token"
+
+def _get_cdse_token():
+    # استخدم CDSE_TOKEN إن وُجد؛ وإلا جدّد تلقائياً من CLIENT_ID/SECRET
+    tok = os.getenv("CDSE_TOKEN")
+    if tok:
+        return tok
+    cid = os.getenv("CDSE_CLIENT_ID")
+    sec = os.getenv("CDSE_CLIENT_SECRET")
+    if not cid or not sec:
+        return None
+    r = requests.post(TOKEN_URL, data={
+        "grant_type": "client_credentials",
+        "client_id": cid,
+        "client_secret": sec
+    }, timeout=30)
+    if r.ok:
+        return r.json().get("access_token")
+    return None
+
+def download_image(lat, lon, meter_id):
     """
-    تُرجع (img_path, mpp) حيث mpp = أمتار/بكسل للصورة (10م غالباً).
-    تُقص الصورة على مربع يحاكي تقريبا عرض (zoom=16, 640px) الذي كنت تستخدمه مع خرائط جوجل.
+    تجلب أحدث صورة Sentinel-2 L2A حول الإحداثيات، تُقصّها على مربع يماثل مجال الرؤية التقريبي
+    الذي كنت تحصل عليه من Google (zoom=16, 640x640)، وتعيد نفس ناتجك السابق: مسار PNG.
     """
     img_path = os.path.join(IMG_DIR, f"{meter_id}.png")
-    mpp_sidecar = img_path.replace(".png", ".mpp.txt")
-    if os.path.exists(img_path) and os.path.exists(mpp_sidecar):
-        try:
-            mpp = float(open(mpp_sidecar).read())
-            return img_path, mpp
-        except Exception:
-            pass
+    if os.path.exists(img_path):
+        return img_path
 
-    # 1) نحسب مقياس البكسل التقريبي الذي كان في Google عند zoom=16
-    gmap_mpp = 156543.03392 * math.cos(math.radians(lat)) / (2 ** emulate_zoom)
-    half_size_m = gmap_mpp * (out_px / 2.0)
+    # نحافظ على نفس "المقياس" الذي اعتمدته في detect_field (zoom=16) لثبات الحسابات
+    emulate_zoom = 16
+    gmap_mpp = 156543.03392 * math.cos(math.radians(lat)) / (2 ** emulate_zoom)  # m/px
+    half_size_m = gmap_mpp * (640 / 2.0)  # نصف عرض المربع بالمتر
 
-    # نحول نصف العرض بالمتر إلى درجات (تقريب جيد للمديات الصغيرة)
+    # مربع القص (درجات) حول الإحداثيات
     dlat = half_size_m / 111320.0
     dlon = half_size_m / (111320.0 * math.cos(math.radians(lat)))
     minx, miny, maxx, maxy = lon - dlon, lat - dlat, lon + dlon, lat + dlat
     bbox_4326 = (minx, miny, maxx, maxy)
 
-    # 2) نبحث أحدث مشهد Sentinel-2 L2A ضمن نافذة زمنية وبحد غيوم
+    # تجهيز الهيدر بالتوكن (لو متوفر)
     headers = {}
-    try:
-        headers["Authorization"] = f"Bearer {get_cdse_token()}"
-    except Exception:
-        pass  # قد يعمل عامة بدون توكن، لكن يفضّل وجوده
+    token = _get_cdse_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
 
+    # البحث عن أحدث مشهد خالٍ تقريباً من الغيوم آخر 30 يوم
     client = Client.open(CDSE_STAC_URL, headers=headers)
     end = datetime.utcnow()
-    start = end - timedelta(days=days_back)
-
+    start = end - timedelta(days=30)
     search = client.search(
         collections=["sentinel-2-l2a"],
         bbox=bbox_4326,
         datetime=f"{start.isoformat()}Z/{end.isoformat()}Z",
-        query={"eo:cloud_cover": {"lt": max_cloud}}
+        query={"eo:cloud_cover": {"lt": 10}}
     )
     items = list(search.get_items())
     if not items:
-        return None, None
-    # الأحدث أولاً
+        return None
+
     items.sort(key=lambda it: it.properties.get("datetime"), reverse=True)
     item = items[0]
 
-    # 3) التحميل والقص على الـ bbox بدقة 10م (True Color: B04,B03,B02)
+    # تحميل الباندات (True Color) وقصّها على نفس الـ bbox
+    # نطلب resolution يساوي gmap_mpp (قد يُعاد تحجيم من 10م الأصلي، وهذا طبيعي)
     ds = stac_load(
         [item],
-        bands=["B04", "B03", "B02"],
+        bands=["B04", "B03", "B02"],  # R,G,B
         bbox=bbox_4326,
-        resolution=10,   # متر/بكسل
-        chunks={},       # تحميل مباشر
+        resolution=float(gmap_mpp),
+        chunks={}
     )
-    # (T, Y, X)
+
     r = ds["B04"].isel(time=0).data
     g = ds["B03"].isel(time=0).data
     b = ds["B02"].isel(time=0).data
@@ -151,17 +132,17 @@ def download_image(lat, lon, meter_id,
         return (x * 255.0).clip(0, 255).astype(np.uint8)
 
     rgb = np.dstack([to_uint8(r), to_uint8(g), to_uint8(b)])
+
+    # ضمان الحجم 640x640 مثل ناتج Google Static Maps (إن لم يكن كذلك)
+    h, w = rgb.shape[:2]
+    if (h, w) != (640, 640):
+        rgb = np.array(Image.fromarray(rgb).resize((640, 640), Image.BILINEAR))
+
     Image.fromarray(rgb).save(img_path)
+    return img_path
+# ======================== نهاية التعديل ==========================
 
-    # بما أننا طلبنا resolution=10 → مقياس البكسل 10 متر/بكسل
-    mpp = 10.0
-    with open(mpp_sidecar, "w") as f:
-        f.write(str(mpp))
-
-    return img_path, mpp
-# ============================================================
-
-def detect_field(img_path, lat, lon, meter_id, model_yolo, mpp):
+def detect_field(img_path, lat, lon, meter_id, model_yolo):
     image = Image.open(img_path).convert("RGB")
     results = model_yolo.predict(source=image, imgsz=640, conf=0.1)[0]
     if not results.boxes:
@@ -170,22 +151,20 @@ def detect_field(img_path, lat, lon, meter_id, model_yolo, mpp):
     conf = float(results.boxes[0].conf.cpu().numpy())
     if conf < 0.1:
         return None, None, None, None
-
-    # مقياس البكسل الحقيقي للصورة (10م عادةً ل Sentinel-2)
-    scale = mpp
+    scale = 156543.03392 * math.cos(math.radians(lat)) / (2 ** 16)
     area = abs(box[2] - box[0]) * abs(box[3] - box[1]) * (scale ** 2)
     corrected_area = area * CALIBRATION_FACTOR
     if corrected_area < 1000:
         return None, None, None, None
 
     img_center_pixel = ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
-    # نفس حساباتك السابقة لكن بمقياس البكسل الحقيقي
     dx = (img_center_pixel[0] - 320) * scale
     dy = (img_center_pixel[1] - 320) * scale
 
     field_lat = lat - (dy / 111320)
     field_lon = lon + (dx / (40075000 * math.cos(math.radians(lat)) / 360))
 
+    # تعديل لحساب المسافة من حافة الحقل إلى العداد
     width_px = abs(box[2] - box[0])
     height_px = abs(box[3] - box[1])
     radius_px = max(width_px, height_px) / 2
@@ -215,6 +194,7 @@ if uploaded_file:
     breaker_filter = st.sidebar.selectbox("سعة القاطع", ["الكل"] + sorted(df["Breaker"].unique().tolist()))
     sort_order = st.sidebar.radio("ترتيب حسب الاستهلاك", ["بدون ترتيب", "تصاعدي", "تنازلي"])
     
+    # خيار تجاوز الشذوذ والمعايير
     ignore_anomalies = st.sidebar.checkbox("🔍 عرض كل الحقول المكتشفة فقط (تجاهل الشذوذ والاستهلاك)")
 
     if breaker_filter != "الكل":
@@ -240,16 +220,11 @@ if uploaded_file:
         for i, (_, row) in enumerate(df.iterrows(), 1):
             meter_id, lat, lon = row["Subscription"], row["y"], row["x"]
             breaker, consumption, office = row["Breaker"], row["consumption"], row["Office"]
-
-            # ======= استبدال جلب الصورة =======
-            img_mpp = download_image(lat, lon, meter_id)
-            if not img_mpp or img_mpp[0] is None:
-                # إذا ما لقى مشهد مناسب ممكن تتخطى أو تضع لوج
+            img_path = download_image(lat, lon, meter_id)
+            if not img_path:
                 continue
-            img_path, mpp = img_mpp
-            # ==================================
 
-            conf, img_detected, area, distance = detect_field(img_path, lat, lon, meter_id, model_yolo, mpp)
+            conf, img_detected, area, distance = detect_field(img_path, lat, lon, meter_id, model_yolo)
             if conf is None:
                 continue
 
