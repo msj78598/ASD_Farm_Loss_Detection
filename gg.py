@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
 """
+نظام اكتشاف حالات الفاقد للفئة الزراعية (Streamlit + YOLO + Isolation Forest + Copernicus)
+- اختيار "كثافة المحصول (الخضرة)" من الواجهة قبل التشغيل (منخفض/متوسط/عالي)
+- تحسين الكشف: فحص عدة صناديق YOLO، وفلترة خضرة ذكية، ومعادلة خطر تربط (مساحة/استهلاك/قاطع/خضرة)
 """
 
 import os, io, time, base64, math
@@ -21,7 +24,7 @@ class AppConfig:
     map_size: Tuple[int, int] = (640, 640)   # أبعاد الصورة الناتجة
     scene_size_m: int = 2500                 # عرض/ارتفاع المشهد بالأمتار (ثابت)
     calibration_factor: float = 0.6695
-    min_confidence_accept: float = 0.45      # ← كان 0.90: خفّضناه
+    min_confidence_accept: float = 0.45      # أخف من 0.90 لالتقاط مزيد من الصناديق
     min_area_m2: float = 5000.0
     max_edge_distance_m: float = 100.0
     risk_low: float = 0.40
@@ -34,10 +37,16 @@ class AppConfig:
     page_title: str = "🌾 نظام اكتشاف حالات الفاقد للفئة الزراعية"
     page_icon: str = "🌾"
 
-    # ====== إعدادات فلترة “الخضرة” ======
-    green_ratio_min: float = 0.30   # ✅ 30% الحد الأدنى للخضرة
-    green_dominance: float = 1.1    # G أعلى من R و B بهذه النسبة (أقل تشددًا)
+    # إعدادات فلترة “الخضرة” (ستُضبط من الواجهة)
+    green_ratio_min: float = 0.40   # ستتغير حسب اختيار المستخدم (منخفض 0.25 / متوسط 0.40 / عالي 0.55)
+    green_dominance: float = 1.1    # G أعلى من R و B بهذه النسبة
     green_min_value: int = 60       # حد أدنى لقيمة G
+
+    # أوزان معادلة الخطر
+    w_breaker: float = 0.25
+    w_consumption: float = 0.25
+    w_anomaly: float = 0.20
+    w_green: float = 0.30           # خطر نباتي (عكسي للخضرة)
 
 cfg = AppConfig()
 
@@ -57,9 +66,10 @@ def save_results_excel(df: pd.DataFrame) -> bytes:
     return buf.read()
 
 def save_results_html(rows: List[List], colors: dict, detected_dir: str) -> bytes:
+    # rows: [meter, pr, score, edge, area, cons, br, off, lat, lon, green_ratio]
     html = ["<html><head><meta charset='UTF-8'></head><body><div style='display:flex;flex-wrap:wrap;'>"]
     for r in rows:
-        meter_id, priority, risk, distance, area, consumption, breaker, office, lat, lon = r
+        meter_id, priority, risk, distance, area, consumption, breaker, office, lat, lon, green_ratio = r
         border = colors.get(priority, "#ccc")
         pth = os.path.join(detected_dir, f"{meter_id}.png")
         img_tag = ""
@@ -71,10 +81,9 @@ def save_results_html(rows: List[List], colors: dict, detected_dir: str) -> byte
 <div style='border:4px solid {border};padding:10px;border-radius:10px;margin:6px;text-align:center;'>
   {img_tag}<br>
   <strong>عداد {meter_id} ({priority})</strong><br>
-  خطر: {risk*100:.1f}% | مسافة: {distance:.1f}م | مساحة: {area}م²<br>
+  خطر: {risk*100:.1f}% | 🌿 خضرة: {green_ratio*100:.0f}% | مسافة: {distance:.1f}م | مساحة: {area}م²<br>
   الاستهلاك: {consumption} | القاطع: {breaker} | المكتب: {office}<br>
   <a href='https://maps.google.com?q={lat},{lon}'>📍 الموقع</a>
-  <a href='https://wa.me/?text=عداد:{meter_id}%20الموقع:{lat},{lon}'>📲 واتساب</a>
 </div>""")
     html.append("</div></body></html>")
     return "\n".join(html).encode("utf-8")
@@ -90,14 +99,28 @@ class RiskModel:
         self.scaler = joblib.load(scaler_path)
         self.low_thr, self.high_thr = low_thr, high_thr
 
-    def compute(self, breaker, consumption, lon, lat, area_m2):
+    @staticmethod
+    def vegetation_risk(green_ratio: float) -> float:
+        # يحوّل الخضرة [0..1] إلى خطر [0..1] — كلما زادت الخضرة قلّ الخطر.
+        # r4=1 عند خضرة 0%، و r4≈0 عند خضرة >= 70%
+        return float(max(0.0, 1.0 - green_ratio / 0.7))
+
+    def compute(self, breaker, consumption, lon, lat, area_m2, green_ratio):
         X = np.array([[breaker, consumption, lon, lat]], dtype=float)
         Xs = self.scaler.transform(X)
         anomaly = self.model.predict(Xs)[0]
+
+        # r1: قاطع صغير لمساحة كبيرة
         r1 = 1.0 if breaker < area_m2 * 0.006 else 0.0
+        # r2: استهلاك أقل من المتوقع لمساحة كبيرة
         r2 = 1.0 if consumption < area_m2 * 0.4 else 0.0
+        # r3: شذوذ من نموذج العزل
         r3 = 1.0 if anomaly == 1 else 0.0
-        score = 0.4*r1 + 0.4*r2 + 0.2*r3
+        # r4: خطر نباتي (عكسي للخضرة)
+        r4 = self.vegetation_risk(green_ratio)
+
+        score = cfg.w_breaker*r1 + cfg.w_consumption*r2 + cfg.w_anomaly*r3 + cfg.w_green*r4
+
         if score >= self.high_thr:
             pr = "قصوى"
         elif score >= self.low_thr:
@@ -113,7 +136,7 @@ def estimate_green_ratio(image: Image.Image, box_xyxy: Tuple[float, float, float
         return 0.0
     crop = image.crop((x1, y1, x2, y2))
 
-    # ---- قناع 1: سيادة الأخضر (Dominance) ----
+    # قناع 1: سيادة الأخضر (Dominance)
     arr = np.asarray(crop, dtype=np.uint8)
     if arr.size == 0:
         return 0.0
@@ -122,17 +145,17 @@ def estimate_green_ratio(image: Image.Image, box_xyxy: Tuple[float, float, float
     B = arr[..., 2].astype(np.float32)
     dominance_mask = (G > R * cfg.green_dominance) & (G > B * cfg.green_dominance) & (G > cfg.green_min_value)
 
-    # ---- قناع 2: Excess Green (ExG) ----
+    # قناع 2: Excess Green (ExG)
     Rn = R / 255.0; Gn = G / 255.0; Bn = B / 255.0
     exg = 2.0 * Gn - Rn - Bn
-    exg_mask = exg > 0.08  # عتبة لطيفة
+    exg_mask = exg > 0.08
 
-    # ---- قناع 3: HSV (نطاق أخضر) ----
+    # قناع 3: HSV نطاق أخضر
     hsv = crop.convert("HSV")
     H = np.asarray(hsv.getchannel(0), dtype=np.uint8)
     S = np.asarray(hsv.getchannel(1), dtype=np.uint8)
     V = np.asarray(hsv.getchannel(2), dtype=np.uint8)
-    # Hue الأخضر تقريبًا بين 35°–95° (مقياس 0..255 ≈ 25..67)
+    # الأخضر تقريبًا بين 35°–95° (0..255 ≈ 25..67)
     hsv_mask = (H >= 25) & (H <= 67) & (S >= 60) & (V >= 50)
 
     green_mask = dominance_mask | exg_mask | hsv_mask
@@ -189,7 +212,7 @@ def detect_field(img_path, lat, lon, meter_id, model_yolo,
         if edge > max_edge_distance_m:
             continue
 
-        # فلترة الخُضرة
+        # فلترة الخضرة
         green_ratio = estimate_green_ratio(image, tuple(box.tolist()))
         if green_ratio < cfg.green_ratio_min:
             continue
@@ -198,7 +221,6 @@ def detect_field(img_path, lat, lon, meter_id, model_yolo,
         draw = ImageDraw.Draw(image)
         draw.rectangle(box.tolist(), outline="green", width=3)
         draw.line([(cx, cy), (bx, by)], fill="yellow", width=2)
-        # توضيح نسبة الخضرة على الصورة
         draw.text((int(box[0])+4, int(box[1])+4), f"Green {green_ratio*100:.0f}%", fill="white")
 
         os.makedirs(detected_dir, exist_ok=True)
@@ -207,7 +229,6 @@ def detect_field(img_path, lat, lon, meter_id, model_yolo,
 
         return FieldDetection(tuple(box.tolist()), conf, int(corrected), (flat, flon), round(edge,2), out_path, green_ratio)
 
-    # لو ما في ولا صندوق اجتاز القيود
     return None
 
 # ======================= CDSE Token & Download =======================
@@ -269,7 +290,7 @@ def download_image(lat, lon, meter_id, timeout=30):
 //VERSION=3
 function setup(){return {input:["B04","B03","B02"],output:{bands:3}}}
 function evaluatePixel(s){
-  // تخفيف التضخيم لتقليل قصّ القنوات
+  // تضخيم معتدل لتفادي قص الألوان
   return [s.B04*1.8, s.B03*1.8, s.B02*1.8]
 }
 """
@@ -302,6 +323,21 @@ SCALER_PATH = os.path.join(cfg.models_dir, "isolation_scaler.joblib")
 st.title(cfg.page_title)
 uploaded = st.file_uploader("📁 رفع ملف البيانات (Excel)", type=["xlsx"])
 colors = {"قصوى": "#ff4d4d", "متوسطة": "#ffa500", "منخفضة": "#4CAF50"}
+
+# ===== واجهة اختيار فلتر الخضرة =====
+st.sidebar.markdown("### 🌿 كثافة المحصول (فلتر الخضرة)")
+green_level = st.sidebar.selectbox(
+    "اختر مستوى الصرامة:",
+    ["منخفض (أقَلّ استبعاد)", "متوسط (افتراضي)", "عالي (أكثر استبعاد)"],
+    index=1
+)
+if green_level.startswith("منخفض"):
+    cfg.green_ratio_min = 0.25
+elif green_level.startswith("عالي"):
+    cfg.green_ratio_min = 0.55
+else:
+    cfg.green_ratio_min = 0.40
+st.sidebar.caption(f"الحد الأدنى الحالي للخضرة: {int(cfg.green_ratio_min*100)}%")
 
 if uploaded:
     df = read_excel(uploaded)
@@ -362,15 +398,15 @@ if uploaded:
                 if det is None:
                     progress.progress(i / n); continue
 
-                score, pr = risk_model.compute(br, cons, lon, lat, det.area_m2)
-                results.append([meter, pr, score, det.edge_distance_m, det.area_m2, cons, br, off, lat, lon])
+                score, pr = risk_model.compute(br, cons, lon, lat, det.area_m2, det.green_ratio)
+                results.append([meter, pr, score, det.edge_distance_m, det.area_m2, cons, br, off, lat, lon, det.green_ratio])
 
                 with open(det.out_img_path, "rb") as f: img64 = base64.b64encode(f.read()).decode()
                 cols[col_i % 3].markdown(f"""
 <div style="border:4px solid {colors.get(pr,'#ccc')};padding:10px;border-radius:12px;margin:6px;text-align:center;">
   <img src="data:image/png;base64,{img64}" width="260"><br>
   <strong>عداد {meter} ({pr})</strong><br>
-  خطر:{score*100:.1f}% | مسافة:{det.edge_distance_m:.1f}م | مساحة:{det.area_m2}م²<br>
+  خطر:{score*100:.1f}% | 🌿 خضرة:{det.green_ratio*100:.0f}% | مسافة:{det.edge_distance_m:.1f}م | مساحة:{det.area_m2}م²<br>
   استهلاك:{cons} | قاطع:{br} | مكتب:{off}<br>
   <a href="https://maps.google.com?q={lat},{lon}">📍 الموقع</a>
 </div>""", unsafe_allow_html=True)
@@ -385,7 +421,7 @@ if uploaded:
         if results:
             res_df = pd.DataFrame(results, columns=[
                 "Subscription","priority","risk_score","edge_distance_m","area_m2",
-                "consumption","breaker","office","lat","lon"
+                "consumption","breaker","office","lat","lon","green_ratio"
             ])
             st.sidebar.download_button("📥 نتائج Excel", data=save_results_excel(res_df), file_name="results.xlsx")
             st.sidebar.download_button("📥 تقرير HTML", data=save_results_html(results, colors, cfg.detected_dir),
