@@ -15,3 +15,10 @@ shapely==2.0.4
 pyproj==3.6.1
 numpy==1.26.4
 requests>=2.31
+pystac-client==0.7.6
+odc-stac==0.3.10
+rasterio==1.3.9
+shapely==2.0.4
+pyproj==3.6.1
+numpy==1.26.4
+requests>=2.31
