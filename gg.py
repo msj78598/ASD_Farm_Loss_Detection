@@ -1,12 +1,10 @@
 # -*- coding: utf-8 -*-
 """
 نظام اكتشاف حالات الفاقد للفئة الزراعية (Streamlit + YOLO + Isolation Forest + Copernicus)
-- فلتر "كثافة المحصول (الخضرة)" قبل التشغيل (منخفض/متوسط/عالي)
-- قياسان نباتيان:
-   1) green_coverage: نسبة تغطية الخضرة داخل البوكس
-   2) growth_strength: قوة النمو (يزيد مع الأخضر الداكن المشبع)
-- ربط الخطر بالهندسة (مساحة/قاطع/استهلاك) + الشذوذ + النمو
-- تصعيد فوري للحالات ذات نمو مرتفع مع استهلاك/قاطع غير ملائمين
+- يعتمد قياس النبات على NDVI الحقيقي (B08/B04) وليس ألوان RGB
+- ينزّل RGB للعرض + NDVI FLOAT32 للحساب
+- فلتر "كثافة المحصول" يضبط حد تغطية NDVI قبل التشغيل
+- معادلة الخطر تربط (مساحة/قاطع/استهلاك) + الشذوذ + النمو النباتي (NDVI)
 """
 
 import os, io, time, base64, math
@@ -25,14 +23,14 @@ import joblib
 # ======================= إعدادات ثابتة =======================
 @dataclass
 class AppConfig:
-    map_size: Tuple[int, int] = (640, 640)
-    scene_size_m: int = 2500
+    map_size: Tuple[int, int] = (640, 640)   # عرض/ارتفاع الصورة الناتجة
+    scene_size_m: int = 2500                 # عرض/ارتفاع المشهد بالمتر
     calibration_factor: float = 0.6695
 
     # كشف YOLO
     min_confidence_accept: float = 0.45
 
-    # شروط هندسية
+    # قواعد هندسية
     min_area_m2: float = 5000.0
     max_edge_distance_m: float = 100.0
 
@@ -48,28 +46,21 @@ class AppConfig:
     page_title: str = "🌾 نظام اكتشاف حالات الفاقد للفئة الزراعية"
     page_icon: str = "🌾"
 
-    # ====== إعدادات "كثافة المحصول" ======
-    # (1) فلتر تغطية الخضرة (يتغير من الواجهة)
-    green_ratio_min: float = 0.40     # (منخفض 0.25 / متوسط 0.40 / عالي 0.55)
-    # (2) حساسية الأقنعة
-    green_dominance: float = 1.1      # G أعلى من R و B بهذه النسبة
-    green_min_value: int = 60         # حد أدنى لقيمة G
-    # (3) بارامترات وزن "الأخضر الداكن" في HSV
-    hue_center: int = 50              # ~درجة الأخضر على 0..255
-    hue_halfwidth: int = 40           # عرض نافذة الأخضر
-    v_dark_clip: float = 0.15         # تجاهل الظلال الأشد ظلمة
-    v_bright_clip: float = 0.85       # تقليل أثر السطوع الشديد
-    dark_gamma: float = 1.0           # قوة ترجيح الظلام (كلما زادت زاد تفضيل الداكن)
+    # ====== إعدادات النبات/NDVI ======
+    # حد تغطية النبات (يُعدل من الواجهة: منخفض/متوسط/عالي)
+    green_coverage_min: float = 0.30    # نسبة بكسلات NDVI≥thr ضمن البوكس
+    ndvi_thr_green: float = 0.25        # بكسل يُعد نباتي إذا NDVI ≥ هذا الحد
+    ndvi_strong: float = 0.60           # نمو قوي ~ حقل داكن (للتصعيد)
 
     # أوزان معادلة الخطر
     w_breaker: float = 0.30
     w_consumption: float = 0.40
     w_anomaly: float = 0.15
-    w_green: float = 0.15             # خطر نباتي عكسي (يقل مع قوة النمو)
+    w_green: float = 0.15               # خطر نباتي عكسي (يقل مع قوة النمو)
 
-    # تصعيد فوري إذا نمو مرتفع واستهلاك/قاطع غير مناسبين
-    growth_escalation_thr: float = 0.70
-    escalation_score: float = 0.85
+    # تصعيد فوري إذا نمو قوي + عدم ملاءمة قاطع/استهلاك
+    growth_escalation_thr: float = 0.60
+    escalation_score: float = 0.90
 
 cfg = AppConfig()
 
@@ -89,10 +80,10 @@ def save_results_excel(df: pd.DataFrame) -> bytes:
     return buf.read()
 
 def save_results_html(rows: List[List], colors: dict, detected_dir: str) -> bytes:
-    # rows: [meter, pr, score, edge, area, cons, br, off, lat, lon, green_cov, growth_str]
+    # rows: [meter, pr, score, edge, area, cons, br, off, lat, lon, green_cov, growth_mean]
     html = ["<html><head><meta charset='UTF-8'></head><body><div style='display:flex;flex-wrap:wrap;'>"]
     for r in rows:
-        meter_id, priority, risk, distance, area, consumption, breaker, office, lat, lon, green_cov, growth_str = r
+        meter_id, priority, risk, distance, area, consumption, breaker, office, lat, lon, green_cov, growth_mean = r
         border = colors.get(priority, "#ccc")
         pth = os.path.join(detected_dir, f"{meter_id}.png")
         img_tag = ""
@@ -104,7 +95,7 @@ def save_results_html(rows: List[List], colors: dict, detected_dir: str) -> byte
 <div style='border:4px solid {border};padding:10px;border-radius:10px;margin:6px;text-align:center;'>
   {img_tag}<br>
   <strong>عداد {meter_id} ({priority})</strong><br>
-  خطر: {risk*100:.1f}% | 🌿 تغطية:{green_cov*100:.0f}% | 🌱 نمو:{growth_str*100:.0f}% | مسافة:{distance:.1f}م | مساحة:{area}م²<br>
+  خطر: {risk*100:.1f}% | 🌿 تغطية:{green_cov*100:.0f}% | 🌱 NDVI:{growth_mean*100:.0f}% | مسافة:{distance:.1f}م | مساحة:{area}م²<br>
   استهلاك:{consumption} | قاطع:{breaker} | مكتب:{office}<br>
   <a href='https://maps.google.com?q={lat},{lon}'>📍 الموقع</a>
 </div>""")
@@ -123,13 +114,13 @@ class RiskModel:
         self.low_thr, self.high_thr = low_thr, high_thr
 
     @staticmethod
-    def vegetation_risk(growth_strength: float) -> float:
-        # r_green: خطر نباتي عكسي لقوة النمو
-        # 1 عند نمو=0 ، يقترب من 0 عند نمو>=0.7
-        return float(max(0.0, 1.0 - growth_strength / 0.7))
+    def vegetation_risk(growth_mean: float) -> float:
+        # خطر نباتي عكسي لقوة النمو (NDVI متوسط ضمن النبات)
+        # يقترب من 0 عند NDVI≥0.7
+        return float(max(0.0, 1.0 - growth_mean / 0.7))
 
-    def compute(self, breaker, consumption, lon, lat, area_m2, green_coverage, growth_strength):
-        # r1/r2 الأساسيان (Binary)
+    def compute(self, breaker, consumption, lon, lat, area_m2, green_coverage, growth_mean):
+        # r1/r2: قواعد هندسية
         r1_base = 1.0 if breaker < area_m2 * 0.006 else 0.0
         r2_base = 1.0 if consumption < area_m2 * 0.4 else 0.0
 
@@ -139,21 +130,19 @@ class RiskModel:
         anomaly = self.model.predict(Xs)[0]
         r3 = 1.0 if anomaly == 1 else 0.0
 
-        # تضخيم أثر r1/r2 عند نمو مرتفع
-        r1 = min(1.0, r1_base * (0.6 + 0.6 * growth_strength))
-        r2 = min(1.0, r2_base * (0.7 + 0.8 * growth_strength))
+        # تضخيم أثر الخلل مع نمو أقوى
+        r1 = min(1.0, r1_base * (0.6 + 0.8 * growth_mean))
+        r2 = min(1.0, r2_base * (0.7 + 1.0 * growth_mean))
 
         # خطر نباتي عكسي
-        r4 = self.vegetation_risk(growth_strength)
+        r4 = self.vegetation_risk(growth_mean)
 
-        # مجموع مرجّح
         score = cfg.w_breaker*r1 + cfg.w_consumption*r2 + cfg.w_anomaly*r3 + cfg.w_green*r4
 
-        # تصعيد فوري: نمو قوي + خلل قاطع/استهلاك
-        if growth_strength >= cfg.growth_escalation_thr and (r1_base == 1.0 or r2_base == 1.0):
+        # تصعيد فوري: NDVI قوي وحقل كبير لكن قاطع/استهلاك غير ملائمين
+        if (growth_mean >= cfg.growth_escalation_thr) and (r1_base == 1.0 or r2_base == 1.0):
             score = max(score, cfg.escalation_score)
 
-        # تصنيف
         if score >= self.high_thr:
             pr = "قصوى"
         elif score >= self.low_thr:
@@ -162,67 +151,33 @@ class RiskModel:
             pr = "منخفضة"
         return score, pr
 
-# ======================= قياس الخضرة والنمو =======================
-def estimate_vegetation(image: Image.Image, box_xyxy: Tuple[float, float, float, float]) -> Tuple[float, float]:
-    """
-    يعيد:
-      green_coverage ∈ [0..1]  : نسبة البوكس المصنفة خضراء
-      growth_strength ∈ [0..1] : قوة النمو (يزيد للأخضر الداكن المشبع)
-    """
-    x1, y1, x2, y2 = [int(v) for v in box_xyxy]
+# ======================= NDVI Helpers =======================
+def ndvi_from_tiff(path: str) -> np.ndarray:
+    # TIFF FLOAT32 أحادي الحزمة
+    img = Image.open(path)
+    arr = np.array(img).astype(np.float32)
+    # أحيانًا تأتي tiff بقيم خارج [-1,1]؛ نقيدها
+    arr = np.clip(arr, -1.0, 1.0)
+    return arr
+
+def estimate_vegetation_ndvi(ndvi: np.ndarray, box: Tuple[float, float, float, float]) -> Tuple[float, float]:
+    x1, y1, x2, y2 = [int(v) for v in box]
+    x1 = max(0, min(ndvi.shape[1]-1, x1))
+    x2 = max(0, min(ndvi.shape[1],   x2))
+    y1 = max(0, min(ndvi.shape[0]-1, y1))
+    y2 = max(0, min(ndvi.shape[0],   y2))
     if x2 <= x1 or y2 <= y1:
         return 0.0, 0.0
-    crop = image.crop((x1, y1, x2, y2))
-
-    # 1) أقنعة خضراء بسيطة
-    arr = np.asarray(crop, dtype=np.uint8)
-    if arr.size == 0:
-        return 0.0, 0.0
-    R = arr[..., 0].astype(np.float32)
-    G = arr[..., 1].astype(np.float32)
-    B = arr[..., 2].astype(np.float32)
-
-    dominance_mask = (G > R * cfg.green_dominance) & (G > B * cfg.green_dominance) & (G > cfg.green_min_value)
-
-    Rn = R / 255.0; Gn = G / 255.0; Bn = B / 255.0
-    exg = 2.0 * Gn - Rn - Bn
-    exg_mask = exg > 0.08
-
-    hsv = crop.convert("HSV")
-    H = np.asarray(hsv.getchannel(0), dtype=np.uint8)
-    S = np.asarray(hsv.getchannel(1), dtype=np.uint8)
-    V = np.asarray(hsv.getchannel(2), dtype=np.uint8)
-
-    hsv_mask = (H >= cfg.hue_center - cfg.hue_halfwidth) & (H <= cfg.hue_center + cfg.hue_halfwidth) & (S >= 40)
-
-    green_mask = dominance_mask | exg_mask | hsv_mask
-    if green_mask.size == 0:
+    crop = ndvi[y1:y2, x1:x2]
+    if crop.size == 0:
         return 0.0, 0.0
 
+    green_mask = crop >= cfg.ndvi_thr_green
     green_coverage = float(green_mask.mean())
-
-    # 2) قوة النمو (تفضيل الأخضر الداكن المشبع)
-    # وزن قرب اللون من الأخضر
-    hue_weight = np.clip(1.0 - np.abs(H.astype(np.int16) - cfg.hue_center) / float(cfg.hue_halfwidth), 0.0, 1.0)
-    S_norm = S / 255.0
-    V_norm = V / 255.0
-
-    # وزن الظلام: نريد مكافأة البكسلات الغامقة لكن نتجنب الظلال الشديدة والسطوع العالي
-    v_adj = np.clip(1.0 - V_norm, 0.0, 1.0)
-    # قصّ الأطراف: أقل من v_dark_clip = تجاهل، أكثر من v_bright_clip = تقليل
-    v_adj = np.clip((v_adj - cfg.v_dark_clip) / max(1e-6, (cfg.v_bright_clip - cfg.v_dark_clip)), 0.0, 1.0)
-    dark_weight = v_adj ** cfg.dark_gamma
-
-    # درجة النمو لكل بكسل
-    growth_pix = hue_weight * S_norm * dark_weight
-
-    # متوسط القوة داخل البكسلات الخضراء فقط
-    if green_mask.any():
-        growth_strength = float(growth_pix[green_mask].mean())
-    else:
-        growth_strength = 0.0
-
-    return green_coverage, growth_strength
+    growth_mean = float(crop[green_mask].mean()) if green_mask.any() else 0.0
+    # حول growth_mean إلى [0..1] للمقارنة في العرض (NDVI≈1 => 100%)
+    growth_mean = float(np.clip((growth_mean + 1.0) / 2.0, 0.0, 1.0))  # تطبيع بسيط للعرض
+    return green_coverage, growth_mean
 
 # ======================= الكشف =======================
 @dataclass
@@ -234,7 +189,7 @@ class FieldDetection:
     edge_distance_m: float
     out_img_path: str
     green_coverage: float
-    growth_strength: float
+    growth_mean: float
 
 def detect_boxes(image: Image.Image, model: YOLO, min_conf=0.5):
     res = model.predict(source=image, imgsz=640, conf=min_conf, verbose=False)[0]
@@ -245,10 +200,12 @@ def detect_boxes(image: Image.Image, model: YOLO, min_conf=0.5):
     idxs = np.argsort(-confs)
     return [(boxes[i], float(confs[i])) for i in idxs]
 
-def detect_field(img_path, lat, lon, meter_id, model_yolo,
+def detect_field(img_rgb_path, ndvi_path, lat, lon, meter_id, model_yolo,
                  calibration_factor, min_conf_accept,
                  min_area_m2, max_edge_distance_m, detected_dir):
-    image = Image.open(img_path).convert("RGB")
+    image = Image.open(img_rgb_path).convert("RGB")
+    ndvi = ndvi_from_tiff(ndvi_path)
+
     candidates = detect_boxes(image, model_yolo, min_conf=min_conf_accept)
     if not candidates:
         return None
@@ -276,24 +233,24 @@ def detect_field(img_path, lat, lon, meter_id, model_yolo,
         if edge > max_edge_distance_m:
             continue
 
-        # حساب الخضرة وقوة النمو
-        green_cov, growth_str = estimate_vegetation(image, tuple(box.tolist()))
-        # فلتر تغطية الخضرة
-        if green_cov < cfg.green_ratio_min:
+        # NDVI-based vegetation
+        green_cov, growth_mean = estimate_vegetation_ndvi(ndvi, tuple(box.tolist()))
+        if green_cov < cfg.green_coverage_min:
             continue
 
         # رسم/حفظ أول صندوق ينجح الشروط
         draw = ImageDraw.Draw(image)
         draw.rectangle(box.tolist(), outline="green", width=3)
         draw.line([(cx, cy), (bx, by)], fill="yellow", width=2)
-        draw.text((int(box[0])+4, int(box[1])+4), f"cov {green_cov*100:.0f}% | grow {growth_str*100:.0f}%", fill="white")
+        draw.text((int(box[0])+4, int(box[1])+4),
+                  f"cov {green_cov*100:.0f}% | ndvi {growth_mean*100:.0f}%", fill="white")
 
         os.makedirs(detected_dir, exist_ok=True)
         out_path = os.path.join(detected_dir, f"{meter_id}.png")
         image.save(out_path)
 
         return FieldDetection(tuple(box.tolist()), conf, int(corrected), (flat, flon), round(edge,2),
-                              out_path, green_cov, growth_str)
+                              out_path, green_cov, growth_mean)
 
     return None
 
@@ -326,57 +283,81 @@ def bbox_from_meters(lat: float, lon: float, size_m: float):
     dlon = half / (111320.0 * math.cos(math.radians(lat)))
     return [lon - dlon, lat - dlat, lon + dlon, lat + dlat]
 
-@st.cache_data(show_spinner=False, ttl=24*3600)
-def download_image(lat, lon, meter_id, timeout=30):
-    """
-    ينـزّل مشهد Sentinel-2 True Color بحجم ثابت على 640px
-    """
-    img_path = os.path.join(cfg.images_dir, f"{meter_id}.png")
-    if os.path.exists(img_path):
-        return img_path
+def _process_request(bounds_bbox, responses, evalscript, token, timeout):
+    url = "https://sh.dataspace.copernicus.eu/api/v1/process"
+    payload = {
+        "input": {
+            "bounds": {"bbox": bounds_bbox, "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"}},
+            "data": [{
+                "type": "sentinel-2-l2a",
+                "dataFilter": {"maxCloudCoverage": 60, "mosaickingOrder": "mostRecent"},
+                "processing": {"upsampling": "NEAREST", "downsampling": "NEAREST"}
+            }]
+        },
+        "output": {
+            "width": cfg.map_size[0],
+            "height": cfg.map_size[1],
+            "responses": responses
+        },
+        "evalscript": evalscript
+    }
+    headers = {"Authorization": f"Bearer {token}"}
+    return requests.post(url, headers=headers, json=payload, timeout=timeout)
 
-    def _request(token):
-        bbox = bbox_from_meters(lat, lon, cfg.scene_size_m)
-        url = "https://sh.dataspace.copernicus.eu/api/v1/process"
-        payload = {
-            "input": {
-                "bounds": {"bbox": bbox, "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"}},
-                "data": [{
-                    "type": "sentinel-2-l2a",
-                    "dataFilter": {"maxCloudCoverage": 60, "mosaickingOrder": "mostRecent"},
-                    "processing": {"upsampling": "NEAREST", "downsampling": "NEAREST"}
-                }]
-            },
-            "output": {
-                "width": cfg.map_size[0],
-                "height": cfg.map_size[1],
-                "responses": [{"identifier":"default","format":{"type":"image/png"}}]
-            },
-            "evalscript": """
+@st.cache_data(show_spinner=False, ttl=24*3600)
+def download_rgb_and_ndvi(lat, lon, meter_id, timeout=30):
+    """
+    ينـزّل:
+      - RGB: image/png  => images/{meter}.png
+      - NDVI: image/tiff (FLOAT32) => images/{meter}_ndvi.tif
+    """
+    rgb_path = os.path.join(cfg.images_dir, f"{meter_id}.png")
+    ndvi_path = os.path.join(cfg.images_dir, f"{meter_id}_ndvi.tif")
+    if os.path.exists(rgb_path) and os.path.exists(ndvi_path):
+        return rgb_path, ndvi_path
+
+    bbox = bbox_from_meters(lat, lon, cfg.scene_size_m)
+    token = get_cdse_token()
+
+    # 1) RGB
+    eval_rgb = """
 //VERSION=3
 function setup(){return {input:["B04","B03","B02"],output:{bands:3}}}
+function evaluatePixel(s){return [s.B04*1.8, s.B03*1.8, s.B02*1.8]}
+"""
+    r1 = _process_request(bbox,
+                          [{"identifier":"default","format":{"type":"image/png"}}],
+                          eval_rgb, token, timeout)
+    if r1.status_code == 401:
+        token = get_cdse_token()
+        r1 = _process_request(bbox,
+                              [{"identifier":"default","format":{"type":"image/png"}}],
+                              eval_rgb, token, timeout)
+    if r1.status_code != 200:
+        st.warning(f"Copernicus RGB status {r1.status_code} للعداد {meter_id}: {r1.text[:200]}")
+        return None, None
+    with open(rgb_path, "wb") as f:
+        f.write(r1.content)
+
+    # 2) NDVI (FLOAT32 TIFF)
+    eval_ndvi = """
+//VERSION=3
+function setup(){return {input:["B08","B04"],output:{bands:1, sampleType:"FLOAT32"}}}
 function evaluatePixel(s){
-  // تضخيم معتدل لتفادي قص الألوان
-  return [s.B04*1.8, s.B03*1.8, s.B02*1.8]
+  var ndvi = (s.B08 - s.B04) / (s.B08 + s.B04 + 1e-6);
+  return [ndvi];
 }
 """
-        }
-        headers = {"Authorization": f"Bearer {token}"}
-        return requests.post(url, headers=headers, json=payload, timeout=timeout)
+    r2 = _process_request(bbox,
+                          [{"identifier":"default","format":{"type":"image/tiff"}}],
+                          eval_ndvi, token, timeout)
+    if r2.status_code != 200:
+        st.warning(f"Copernicus NDVI status {r2.status_code} للعداد {meter_id}: {r2.text[:200]}")
+        return None, None
+    with open(ndvi_path, "wb") as f:
+        f.write(r2.content)
 
-    token = get_cdse_token()
-    r = _request(token)
-    if r.status_code == 401:
-        token = get_cdse_token()
-        r = _request(token)
-
-    if r.status_code == 200:
-        with open(img_path, "wb") as f:
-            f.write(r.content)
-        return img_path
-    else:
-        st.warning(f"Copernicus status {r.status_code} للعداد {meter_id}: {r.text[:200]}")
-        return None
+    return rgb_path, ndvi_path
 
 # ======================= واجهة Streamlit =======================
 st.set_page_config(page_title=cfg.page_title, page_icon=cfg.page_icon, layout="wide")
@@ -390,20 +371,20 @@ st.title(cfg.page_title)
 uploaded = st.file_uploader("📁 رفع ملف البيانات (Excel)", type=["xlsx"])
 colors = {"قصوى": "#ff4d4d", "متوسطة": "#ffa500", "منخفضة": "#4CAF50"}
 
-# ===== واجهة اختيار فلتر الخضرة =====
-st.sidebar.markdown("### 🌿 كثافة المحصول (فلتر الخضرة)")
+# ===== واجهة اختيار فلتر الخضرة (تغطية NDVI) =====
+st.sidebar.markdown("### 🌿 كثافة المحصول (حسب NDVI)")
 green_level = st.sidebar.selectbox(
     "اختر مستوى الصرامة:",
     ["منخفض (أقل استبعاد)", "متوسط (افتراضي)", "عالي (أكثر استبعاد)"],
     index=1
 )
 if green_level.startswith("منخفض"):
-    cfg.green_ratio_min = 0.25
+    cfg.green_coverage_min = 0.20
 elif green_level.startswith("عالي"):
-    cfg.green_ratio_min = 0.55
+    cfg.green_coverage_min = 0.45
 else:
-    cfg.green_ratio_min = 0.40
-st.sidebar.caption(f"الحد الأدنى لتغطية الخضرة: {int(cfg.green_ratio_min*100)}%")
+    cfg.green_coverage_min = 0.30
+st.sidebar.caption(f"الحد الأدنى لتغطية NDVI: {int(cfg.green_coverage_min*100)}% (بكسلات NDVI ≥ {cfg.ndvi_thr_green})")
 
 if uploaded:
     df = read_excel(uploaded)
@@ -423,9 +404,9 @@ if uploaded:
         shown, n, t0 = 0, len(df), time.time()
         for i, (_, row) in enumerate(df.iterrows(), 1):
             meter = str(row["Subscription"]); lat, lon = float(row["y"]), float(row["x"])
-            p = download_image(lat, lon, meter)
-            if p:
-                with open(p, "rb") as f: b64 = base64.b64encode(f.read()).decode()
+            rgb_path, ndvi_path = download_rgb_and_ndvi(lat, lon, meter)
+            if rgb_path:
+                with open(rgb_path, "rb") as f: b64 = base64.b64encode(f.read()).decode()
                 cols[shown % 4].markdown(f"""
 <div style="border:1px solid #ddd;border-radius:8px;padding:6px;margin:6px;text-align:center">
   <img src="data:image/png;base64,{b64}" width="230" style="border-radius:6px"><br>
@@ -442,7 +423,7 @@ if uploaded:
         risk_model = RiskModel(ML_MODEL_PATH, SCALER_PATH, cfg.risk_low, cfg.risk_high)
 
         progress = st.sidebar.progress(0)
-        results, cols, col_i = [], st.columns(3), 0
+        results, cols, col_i = [], st.columns(2), 0   # عمودين أوسع
         t0 = time.time()
         n = len(df)
 
@@ -452,30 +433,32 @@ if uploaded:
                 lat, lon = float(row["y"]), float(row["x"])
                 br, cons, off = float(row["Breaker"]), float(row["consumption"]), str(row["Office"])
 
-                img_path = download_image(lat, lon, meter)
-                if not img_path:
+                rgb_path, ndvi_path = download_rgb_and_ndvi(lat, lon, meter)
+                if not (rgb_path and ndvi_path):
                     progress.progress(i / n); continue
 
                 det = detect_field(
-                    img_path, lat, lon, meter, model_yolo,
+                    rgb_path, ndvi_path, lat, lon, meter, model_yolo,
                     cfg.calibration_factor, cfg.min_confidence_accept,
                     cfg.min_area_m2, cfg.max_edge_distance_m, cfg.detected_dir
                 )
                 if det is None:
                     progress.progress(i / n); continue
 
+                # ملاحظة: growth_mean هنا ∈ [0..1] بعد تطبيع بسيط للعرض
+                # نعيد تحويله لتقدير الخطر بنفس النطاق
                 score, pr = risk_model.compute(br, cons, lon, lat, det.area_m2,
-                                               det.green_coverage, det.growth_strength)
+                                               det.green_coverage, det.growth_mean)
 
-                results.append([meter, pr, score, det.edge_distance_m, det.area_m2, cons, br, off, lat, lon,
-                                det.green_coverage, det.growth_strength])
+                results.append([meter, pr, score, det.edge_distance_m, det.area_m2,
+                                cons, br, off, lat, lon, det.green_coverage, det.growth_mean])
 
                 with open(det.out_img_path, "rb") as f: img64 = base64.b64encode(f.read()).decode()
-                cols[col_i % 3].markdown(f"""
+                cols[col_i % 2].markdown(f"""
 <div style="border:4px solid {colors.get(pr,'#ccc')};padding:10px;border-radius:12px;margin:6px;text-align:center;">
-  <img src="data:image/png;base64,{img64}" width="260"><br>
+  <img src="data:image/png;base64,{img64}" width="360"><br>
   <strong>عداد {meter} ({pr})</strong><br>
-  خطر:{score*100:.1f}% | 🌿 تغطية:{det.green_coverage*100:.0f}% | 🌱 نمو:{det.growth_strength*100:.0f}% | مسافة:{det.edge_distance_m:.1f}م | مساحة:{det.area_m2}م²<br>
+  خطر:{score*100:.1f}% | 🌿 تغطية:{det.green_coverage*100:.0f}% | 🌱 NDVI:{det.growth_mean*100:.0f}% | مسافة:{det.edge_distance_m:.1f}م | مساحة:{det.area_m2}م²<br>
   استهلاك:{cons} | قاطع:{br} | مكتب:{off}<br>
   <a href="https://maps.google.com?q={lat},{lon}">📍 الموقع</a>
 </div>""", unsafe_allow_html=True)
@@ -490,7 +473,7 @@ if uploaded:
         if results:
             res_df = pd.DataFrame(results, columns=[
                 "Subscription","priority","risk_score","edge_distance_m","area_m2",
-                "consumption","breaker","office","lat","lon","green_coverage","growth_strength"
+                "consumption","breaker","office","lat","lon","green_coverage","growth_mean"
             ])
             st.sidebar.download_button("📥 نتائج Excel", data=save_results_excel(res_df), file_name="results.xlsx")
             st.sidebar.download_button("📥 تقرير HTML", data=save_results_html(results, colors, cfg.detected_dir),
