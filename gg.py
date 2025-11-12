@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 نظام اكتشاف حالات الفاقد للفئة الزراعية (Streamlit + YOLO + Isolation Forest + Copernicus)
-- يدعم وضع معاينة الصور فقط قبل التمرير على النموذج.
+- ثابت على حجم مشهد مناسب لظهور الحقول بوضوح (640px ≈ 6.4 كم ⇒ ~10م/بكسل)
+- فيه خيار معاينة الصور فقط قبل تشغيل النموذج
 """
 
 import os, io, time, base64, math
@@ -17,11 +18,13 @@ from geopy.distance import geodesic
 from ultralytics import YOLO
 import joblib
 
-# ======================= الإعدادات =======================
+# ======================= إعدادات ثابتة =======================
 @dataclass
 class AppConfig:
-    zoom: int = 15
+    # صورة خرج 640x640 تغطي ~6.4 كم (10م/بكسل)
     map_size: Tuple[int, int] = (640, 640)
+    scene_size_m: int = 6400           # لا منزلق — ثابت
+    zoom_for_metrics: int = 15         # فقط لحساب m/px التقريبي (لا نستخدمه في التنزيل)
     calibration_factor: float = 0.6695
     min_confidence_accept: float = 0.9
     min_area_m2: float = 5000.0
@@ -38,7 +41,7 @@ class AppConfig:
 
 cfg = AppConfig()
 
-# ======================= دوال مساعدة =======================
+# ======================= أدوات مساعدة =======================
 def meters_per_pixel(lat: float, zoom: int) -> float:
     return 156543.03392 * math.cos(math.radians(lat)) / (2 ** zoom)
 
@@ -126,14 +129,16 @@ def detect_best_box(image: Image.Image, model: YOLO, min_conf=0.5):
     return results.boxes.xyxy[idx].cpu().numpy(), float(confs[idx])
 
 def detect_field(img_path, lat, lon, meter_id, model_yolo,
-                 zoom, calibration_factor, min_conf_accept,
+                 calibration_factor, min_conf_accept,
                  min_area_m2, max_edge_distance_m, detected_dir):
     image = Image.open(img_path).convert("RGB")
     box, conf = detect_best_box(image, model_yolo, min_conf=min_conf_accept)
     if box is None or conf < min_conf_accept:
         return None
 
-    res = meters_per_pixel(lat, zoom)
+    # دقة متر/بكسل الحقيقية للصورة: بما أننا نطلب 6.4 كم على 640px ⇒ 10 م/بكسل تقريبًا
+    res = cfg.scene_size_m / float(cfg.map_size[0])
+
     w_px, h_px = abs(box[2]-box[0]), abs(box[3]-box[1])
     area = w_px * h_px * (res**2)
     corrected = area * calibration_factor
@@ -162,9 +167,18 @@ def detect_field(img_path, lat, lon, meter_id, model_yolo,
     image.save(out_path)
     return FieldDetection(tuple(box.tolist()), conf, int(corrected), (flat, flon), round(edge,2), out_path)
 
-# ======================= تنزيل الصور من Copernicus =======================
+# ======================= BBOX و تنزيل الصورة من Copernicus =======================
+def bbox_from_meters(lat: float, lon: float, size_m: float):
+    half = size_m / 2.0
+    dlat = half / 111320.0
+    dlon = half / (111320.0 * math.cos(math.radians(lat)))
+    return [lon - dlon, lat - dlat, lon + dlon, lat + dlat]
+
 @st.cache_data(show_spinner=False, ttl=24*3600)
 def download_image(lat, lon, meter_id, timeout=30):
+    """
+    ينـزّل مشهد Sentinel-2 True Color بحجم ثابت ≈ 6.4 كم × 6.4 كم على 640px ⇒ ~10م/بكسل
+    """
     img_path = os.path.join(cfg.images_dir, f"{meter_id}.png")
     if os.path.exists(img_path):
         return img_path
@@ -174,22 +188,42 @@ def download_image(lat, lon, meter_id, timeout=30):
         st.error("❌ لم يتم ضبط COPERNICUS_TOKEN في secrets.toml")
         return None
 
-    # صندوق صغير حول النقطة (حوالي ~180م)
-    bbox = [lon-0.0008, lat-0.0008, lon+0.0008, lat+0.0008]
+    bbox = bbox_from_meters(lat, lon, cfg.scene_size_m)
 
     url = "https://sh.dataspace.copernicus.eu/api/v1/process"
     payload = {
         "input": {
-            "bounds": {"bbox": bbox, "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"}},
-            "data": [{"type": "sentinel-2-l2a"}]
+            "bounds": {
+                "bbox": bbox,
+                "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"}
+            },
+            "data": [{
+                "type": "sentinel-2-l2a",
+                "dataFilter": {
+                    "maxCloudCoverage": 60,
+                    "mosaickingOrder": "mostRecent"
+                },
+                "processing": {
+                    "upsampling": "NEAREST",
+                    "downsampling": "NEAREST"
+                }
+            }]
         },
-        "output": {"width": cfg.map_size[0], "height": cfg.map_size[1],
-                   "responses": [{"identifier": "default", "format": {"type": "image/png"}}]},
+        "output": {
+            "width": cfg.map_size[0],
+            "height": cfg.map_size[1],
+            "responses": [{"identifier": "default", "format": {"type": "image/png"}}]
+        },
         "evalscript": """
-        //VERSION=3
-        function setup(){return {input:["B04","B03","B02"],output:{bands:3}};}
-        function evaluatePixel(s){return [s.B04*2.5,s.B03*2.5,s.B02*2.5];}
-        """
+//VERSION=3
+function setup() {
+  return {input: ["B04","B03","B02"], output: {bands: 3}};
+}
+function evaluatePixel(s) {
+  // True color مع تعزيز بسيط للسطوع
+  return [s.B04*3.0, s.B03*3.0, s.B02*3.0];
+}
+"""
     }
     headers = {"Authorization": f"Bearer {token}"}
     try:
@@ -199,7 +233,7 @@ def download_image(lat, lon, meter_id, timeout=30):
                 f.write(r.content)
             return img_path
         else:
-            st.warning(f"⚠️ Copernicus status {r.status_code} للعداد {meter_id}")
+            st.warning(f"⚠️ Copernicus status {r.status_code} للعداد {meter_id}: {r.text[:180]}")
             return None
     except Exception as e:
         st.error(f"❌ فشل تحميل صورة من Copernicus: {e}")
@@ -221,7 +255,6 @@ if uploaded:
     df = read_excel(uploaded)
     st.sidebar.info(f"🔢 عدد الحالات: {len(df)}")
 
-    # فلاتر
     breaker_filter = st.sidebar.selectbox("سعة القاطع", ["الكل"] + sorted(df["Breaker"].unique().tolist()))
     sort_order = st.sidebar.radio("ترتيب حسب الاستهلاك", ["بدون ترتيب", "تصاعدي", "تنازلي"])
     if breaker_filter != "الكل":
@@ -231,14 +264,14 @@ if uploaded:
     elif sort_order == "تنازلي":
         df = df.sort_values(by="consumption", ascending=False)
 
-    # عناصر وضع المعاينة
+    # خيار معاينة الصور فقط
     preview_only = st.sidebar.checkbox("🖼️ عرض الصور فقط (بدون تشغيل النموذج)")
     btn_preview = st.sidebar.button("📥 تنزيل/عرض الصور")
 
-    # --- وضع معاينة الصور فقط ---
+    # --- معاينة الصور فقط ---
     if btn_preview:
         progress = st.sidebar.progress(0)
-        cols = st.columns(4)  # شبكة 4 أعمدة
+        cols = st.columns(4)
         shown = 0
         n = len(df)
         t0 = time.time()
@@ -267,7 +300,7 @@ if uploaded:
         st.sidebar.success(f"✅ تم عرض {shown} صورة خلال {time.time()-t0:.1f} ثانية")
         st.stop()  # لا نكمل للتشغيل
 
-    # زر بدء التحليل (التشغيل الكامل)
+    # --- التشغيل الكامل ---
     if st.sidebar.button("🚀 بدء التحليل"):
         model_yolo = load_yolo(MODEL_PATH)
         risk_model = RiskModel(ML_MODEL_PATH, SCALER_PATH, cfg.risk_low, cfg.risk_high)
@@ -286,10 +319,11 @@ if uploaded:
                     progress.progress(i / len(df))
                     continue
 
-                det = detect_field(img, lat, lon, meter, model_yolo,
-                                   cfg.zoom, cfg.calibration_factor,
-                                   cfg.min_confidence_accept, cfg.min_area_m2,
-                                   cfg.max_edge_distance_m, cfg.detected_dir)
+                det = detect_field(
+                    img, lat, lon, meter, model_yolo,
+                    cfg.calibration_factor, cfg.min_confidence_accept,
+                    cfg.min_area_m2, cfg.max_edge_distance_m, cfg.detected_dir
+                )
                 if det is None:
                     progress.progress(i / len(df))
                     continue
