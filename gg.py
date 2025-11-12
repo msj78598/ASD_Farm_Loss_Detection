@@ -10,6 +10,7 @@ import joblib
 import sys
 import time
 from io import BytesIO
+sys.modules['cv2'] = __import__('cv2')
 from ultralytics import YOLO
 from geopy.distance import geodesic
 
@@ -29,80 +30,60 @@ SCALER_PATH = os.path.join(BASE_DIR, "models", "isolation_scaler.joblib")
 FORM_PATH = os.path.join(BASE_DIR, "TEMPLATE.xlsx")
 CALIBRATION_FACTOR = 0.6695
 
+COPERNICUS_TOKEN = "ضع_هنا_التوكن_الخاص_بك"
+
 for path in [IMG_DIR, DETECTED_DIR, OUTPUT_FOLDER]:
     os.makedirs(path, exist_ok=True)
 
-# =========================================
-# فحص وتنزيل النماذج تلقائياً
-# =========================================
-def ensure_file(path: str, url: str, min_mb: float = 5.0) -> str:
-    """يتأكد أن الملف موجود وكبير كفاية، وإلا ينزله من الرابط"""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    need = True
-    if os.path.exists(path):
-        size_mb = os.path.getsize(path) / (1024*1024)
-        if size_mb >= min_mb:
-            try:
-                with open(path, "rb") as f:
-                    head = f.read(100)
-                if b"git-lfs" not in head:
-                    need = False
-            except Exception:
-                pass
-    if need:
-        if not url:
-            raise RuntimeError(f"⚠️ ملف النموذج مفقود: {path}، ضع MODEL_URL في secrets.")
-        r = requests.get(url, timeout=180)
-        r.raise_for_status()
-        with open(path, "wb") as f:
-            f.write(r.content)
-    return path
-
-MODEL_URL = st.secrets.get("MODEL_URL", "")
-ML_MODEL_URL = st.secrets.get("ML_MODEL_URL", "")
-SCALER_URL = st.secrets.get("SCALER_URL", "")
-
-ensure_file(MODEL_PATH, MODEL_URL, min_mb=5.0)
-# يمكن تفعيلهم لو حصل نفس الخطأ
-# ensure_file(ML_MODEL_PATH, ML_MODEL_URL, min_mb=0.05)
-# ensure_file(SCALER_PATH, SCALER_URL, min_mb=0.01)
-
-# =========================================
-# تحميل النماذج
-# =========================================
-@st.cache_resource
 def load_models():
     model_yolo = YOLO(MODEL_PATH)
     model_ml = joblib.load(ML_MODEL_PATH)
     scaler = joblib.load(SCALER_PATH)
     return model_yolo, model_ml, scaler
 
-# =========================================
-# جلب الصور (Google Static Maps أو أي مصدر)
-# =========================================
+
+# ⬇️ دالة جديدة لجلب الصور من Copernicus بدل Google Maps
 def download_image(lat, lon, meter_id):
     img_path = os.path.join(IMG_DIR, f"{meter_id}.png")
     if os.path.exists(img_path):
         return img_path
-    url = "https://maps.googleapis.com/maps/api/staticmap"
-    params = {
-        "center": f"{lat},{lon}",
-        "zoom": 16,
-        "size": "640x640",
-        "maptype": "satellite",
-        "markers": f"color:red|label:X|{lat},{lon}",
-        "key": "AIzaSyAY7NJrBjS42s6upa9z_qgNLVXESuu366Q"
+
+    # نستخدم Sentinel-2 L2A imagery من Copernicus Data Space
+    bbox = f"{lon-0.0008},{lat-0.0008},{lon+0.0008},{lat+0.0008}"  # تقريبًا 80م × 80م
+    url = "https://sh.dataspace.copernicus.eu/api/v1/process"
+
+    payload = {
+        "input": {
+            "bounds": {"bbox": [float(x) for x in bbox.split(",")], "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"}},
+            "data": [{"type": "sentinel-2-l2a", "dataFilter": {"mosaickingOrder": "mostRecent"}}],
+        },
+        "output": {"width": 640, "height": 640, "responses": [{"identifier": "default", "format": {"type": "image/png"}}]},
+        "evalscript": """
+            //VERSION=3
+            function setup() {
+                return {
+                    input: ["B04","B03","B02"],
+                    output: { bands: 3 }
+                };
+            }
+            function evaluatePixel(sample) {
+                return [sample.B04*2.5, sample.B03*2.5, sample.B02*2.5];
+            }
+        """
     }
-    response = requests.get(url, params=params, timeout=15)
+
+    headers = {"Authorization": f"Bearer {COPERNICUS_TOKEN}"}
+
+    response = requests.post(url, headers=headers, json=payload, timeout=60)
     if response.status_code == 200:
         with open(img_path, "wb") as f:
             f.write(response.content)
         return img_path
-    return None
+    else:
+        st.warning(f"⚠️ فشل تحميل صورة من Copernicus: {response.status_code}")
+        return None
 
-# =========================================
-# تحليل الصور واكتشاف الحقول
-# =========================================
+
 def detect_field(img_path, lat, lon, meter_id, model_yolo):
     image = Image.open(img_path).convert("RGB")
     results = model_yolo.predict(source=image, imgsz=640, conf=0.1)[0]
@@ -121,6 +102,7 @@ def detect_field(img_path, lat, lon, meter_id, model_yolo):
     img_center_pixel = ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
     dx = (img_center_pixel[0] - 320) * scale
     dy = (img_center_pixel[1] - 320) * scale
+
     field_lat = lat - (dy / 111320)
     field_lon = lon + (dx / (40075000 * math.cos(math.radians(lat)) / 360))
 
@@ -141,9 +123,7 @@ def detect_field(img_path, lat, lon, meter_id, model_yolo):
     image.save(out_path)
     return round(conf * 100, 2), out_path, int(corrected_area), round(edge_distance, 2)
 
-# =========================================
-# واجهة المستخدم
-# =========================================
+
 st.title("🌾 نظام اكتشاف حالات الفاقد الكهربائي للفئة الزراعية")
 st.download_button("📥 تحميل نموذج البيانات (TEMPLATE.xlsx)", open(FORM_PATH, "rb"), file_name="TEMPLATE.xlsx")
 
@@ -221,33 +201,6 @@ if uploaded_file:
         buffer.seek(0)
         st.sidebar.download_button("📥 تحميل النتائج Excel", buffer, file_name="results.xlsx")
 
-        html_results = "<html><head><meta charset='UTF-8'></head><body><div style='display:flex;flex-wrap:wrap;'>"
-        for res in results:
-            meter_id, priority, confidence, distance, area, consumption, breaker, office, lat, lon = res
-            border_color = colors.get(priority, "#cccccc")
-            img_detected = os.path.join(DETECTED_DIR, f"{meter_id}.png")
-            with open(img_detected, "rb") as img_file:
-                img_b64 = base64.b64encode(img_file.read()).decode()
-
-            html_results += f"""
-            <div style='border:4px solid {border_color};padding:10px;border-radius:10px;margin:5px;text-align:center;'>
-                <img src='data:image/png;base64,{img_b64}' width='250' style='border-radius:8px;'><br>
-                <strong>عداد {meter_id} ({priority})</strong><br>
-                الثقة: {confidence*100:.1f}% | المسافة: {distance}م | المساحة: {area}م²<br>
-                الاستهلاك: {consumption} | القاطع: {breaker} | المكتب: {office}<br>
-                <a href='https://maps.google.com?q={lat},{lon}'>📍 الموقع</a>
-                <a href='https://wa.me/?text=عداد:{meter_id}%20الموقع:{lat},{lon}'>📲 واتساب</a>
-            </div>
-            """
-
-        html_results += "</div></body></html>"
-
-        st.sidebar.download_button(
-            label="📥 تحميل التقرير الكامل HTML",
-            data=html_results.encode('utf-8'),
-            file_name='report.html',
-            mime='text/html'
-        )
         duration = time.time() - start_time
         st.sidebar.success(f"⏱️ اكتمل التحليل في {round(duration,2)} ثانية")
 
