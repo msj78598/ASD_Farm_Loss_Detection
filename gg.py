@@ -10,7 +10,6 @@ import joblib
 import sys
 import time
 from io import BytesIO
-sys.modules['cv2'] = __import__('cv2')
 from ultralytics import YOLO
 from geopy.distance import geodesic
 
