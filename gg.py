@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-نظام اكتشاف حالات الفاقد للفئة الزراعية
 """
 
 import os, io, time, base64, math
 from dataclasses import dataclass
 from typing import Tuple, List
+
 import requests
 import streamlit as st
 import pandas as pd
@@ -19,9 +19,9 @@ import joblib
 @dataclass
 class AppConfig:
     map_size: Tuple[int, int] = (640, 640)   # أبعاد الصورة الناتجة
-    scene_size_m: int = 2500                 # عرض/ارتفاع المشهد بالأمتار
+    scene_size_m: int = 2500                 # عرض/ارتفاع المشهد بالأمتار (ثابت)
     calibration_factor: float = 0.6695
-    min_confidence_accept: float = 0.90
+    min_confidence_accept: float = 0.45      # ← كان 0.90: خفّضناه
     min_area_m2: float = 5000.0
     max_edge_distance_m: float = 100.0
     risk_low: float = 0.40
@@ -35,9 +35,9 @@ class AppConfig:
     page_icon: str = "🌾"
 
     # ====== إعدادات فلترة “الخضرة” ======
-    green_ratio_min: float = 0.1   # ✅ 50% أقل حد للخضرة لاعتبار الحقل مزروعًا
-    green_dominance: float = 1.2    # يجب أن يكون G أعلى من R و B بهذه النسبة
-    green_min_value: int = 80       # حد أدنى لقيمة G لتفادي الظلال والبني
+    green_ratio_min: float = 0.30   # ✅ 30% الحد الأدنى للخضرة
+    green_dominance: float = 1.1    # G أعلى من R و B بهذه النسبة (أقل تشددًا)
+    green_min_value: int = 60       # حد أدنى لقيمة G
 
 cfg = AppConfig()
 
@@ -74,6 +74,7 @@ def save_results_html(rows: List[List], colors: dict, detected_dir: str) -> byte
   خطر: {risk*100:.1f}% | مسافة: {distance:.1f}م | مساحة: {area}م²<br>
   الاستهلاك: {consumption} | القاطع: {breaker} | المكتب: {office}<br>
   <a href='https://maps.google.com?q={lat},{lon}'>📍 الموقع</a>
+  <a href='https://wa.me/?text=عداد:{meter_id}%20الموقع:{lat},{lon}'>📲 واتساب</a>
 </div>""")
     html.append("</div></body></html>")
     return "\n".join(html).encode("utf-8")
@@ -111,14 +112,31 @@ def estimate_green_ratio(image: Image.Image, box_xyxy: Tuple[float, float, float
     if x2 <= x1 or y2 <= y1:
         return 0.0
     crop = image.crop((x1, y1, x2, y2))
+
+    # ---- قناع 1: سيادة الأخضر (Dominance) ----
     arr = np.asarray(crop, dtype=np.uint8)
     if arr.size == 0:
         return 0.0
     R = arr[..., 0].astype(np.float32)
     G = arr[..., 1].astype(np.float32)
     B = arr[..., 2].astype(np.float32)
-    mask = (G > R * cfg.green_dominance) & (G > B * cfg.green_dominance) & (G > cfg.green_min_value)
-    return float(mask.mean())
+    dominance_mask = (G > R * cfg.green_dominance) & (G > B * cfg.green_dominance) & (G > cfg.green_min_value)
+
+    # ---- قناع 2: Excess Green (ExG) ----
+    Rn = R / 255.0; Gn = G / 255.0; Bn = B / 255.0
+    exg = 2.0 * Gn - Rn - Bn
+    exg_mask = exg > 0.08  # عتبة لطيفة
+
+    # ---- قناع 3: HSV (نطاق أخضر) ----
+    hsv = crop.convert("HSV")
+    H = np.asarray(hsv.getchannel(0), dtype=np.uint8)
+    S = np.asarray(hsv.getchannel(1), dtype=np.uint8)
+    V = np.asarray(hsv.getchannel(2), dtype=np.uint8)
+    # Hue الأخضر تقريبًا بين 35°–95° (مقياس 0..255 ≈ 25..67)
+    hsv_mask = (H >= 25) & (H <= 67) & (S >= 60) & (V >= 50)
+
+    green_mask = dominance_mask | exg_mask | hsv_mask
+    return float(green_mask.mean())
 
 # ======================= الكشف =======================
 @dataclass
@@ -129,57 +147,68 @@ class FieldDetection:
     center_latlon: Tuple[float, float]
     edge_distance_m: float
     out_img_path: str
+    green_ratio: float
 
-def detect_best_box(image: Image.Image, model: YOLO, min_conf=0.5):
+def detect_boxes(image: Image.Image, model: YOLO, min_conf=0.5):
     res = model.predict(source=image, imgsz=640, conf=min_conf, verbose=False)[0]
     if not res or not res.boxes or len(res.boxes) == 0:
-        return None, None
+        return []
+    boxes = res.boxes.xyxy.cpu().numpy()
     confs = res.boxes.conf.cpu().numpy()
-    idx = int(confs.argmax())
-    return res.boxes.xyxy[idx].cpu().numpy(), float(confs[idx])
+    idxs = np.argsort(-confs)  # أعلى ثقة أولًا
+    return [(boxes[i], float(confs[i])) for i in idxs]
 
 def detect_field(img_path, lat, lon, meter_id, model_yolo,
                  calibration_factor, min_conf_accept,
                  min_area_m2, max_edge_distance_m, detected_dir):
     image = Image.open(img_path).convert("RGB")
-    box, conf = detect_best_box(image, model_yolo, min_conf=min_conf_accept)
-    if box is None or conf < min_conf_accept:
+    candidates = detect_boxes(image, model_yolo, min_conf=min_conf_accept)
+    if not candidates:
         return None
 
     m_per_px = cfg.scene_size_m / float(cfg.map_size[0])
-    w_px, h_px = abs(box[2]-box[0]), abs(box[3]-box[1])
-    area = w_px * h_px * (m_per_px**2)
-    corrected = area * calibration_factor
-    if corrected < min_area_m2:
-        return None
 
-    cx, cy = image.width/2, image.height/2
-    bx, by = (box[0]+box[2])/2, (box[1]+box[3])/2
-    dx_m, dy_m = (bx-cx)*m_per_px, (by-cy)*m_per_px
-    dlat = -(dy_m / 111320.0)
-    dlon = dx_m / (40075000.0 * math.cos(math.radians(lat)) / 360.0)
-    flat, flon = lat+dlat, lon+dlon
-    radius_px = max(w_px, h_px)/2
-    radius_m = radius_px * m_per_px
-    dist = geodesic((lat, lon), (flat, flon)).meters
-    edge = max(dist - radius_m, 0)
-    if edge > max_edge_distance_m:
-        return None
+    for box, conf in candidates:
+        w_px, h_px = abs(box[2]-box[0]), abs(box[3]-box[1])
+        area = w_px * h_px * (m_per_px**2)
+        corrected = area * calibration_factor
+        if corrected < min_area_m2:
+            continue
 
-    # ====== فلترة اللون الأخضر ======
-    green_ratio = estimate_green_ratio(image, tuple(box.tolist()))
-    if green_ratio < cfg.green_ratio_min:
-        print(f"🟤 {meter_id}: نسبة الأخضر {green_ratio:.1%} < {cfg.green_ratio_min:.0%} → استبعاد")
-        return None
-    # =================================
+        cx, cy = image.width/2, image.height/2
+        bx, by = (box[0]+box[2])/2, (box[1]+box[3])/2
+        dx_m, dy_m = (bx-cx)*m_per_px, (by-cy)*m_per_px
+        dlat = -(dy_m / 111320.0)
+        dlon = dx_m / (40075000.0 * math.cos(math.radians(lat)) / 360.0)
+        flat, flon = lat+dlat, lon+dlon
 
-    draw = ImageDraw.Draw(image)
-    draw.rectangle(box.tolist(), outline="green", width=3)
-    draw.line([(cx, cy), (bx, by)], fill="yellow", width=2)
-    os.makedirs(detected_dir, exist_ok=True)
-    out_path = os.path.join(detected_dir, f"{meter_id}.png")
-    image.save(out_path)
-    return FieldDetection(tuple(box.tolist()), conf, int(corrected), (flat, flon), round(edge, 2), out_path)
+        radius_px = max(w_px, h_px)/2
+        radius_m = radius_px * m_per_px
+        dist = geodesic((lat, lon), (flat, flon)).meters
+        edge = max(dist - radius_m, 0)
+        if edge > max_edge_distance_m:
+            continue
+
+        # فلترة الخُضرة
+        green_ratio = estimate_green_ratio(image, tuple(box.tolist()))
+        if green_ratio < cfg.green_ratio_min:
+            continue
+
+        # رسم/حفظ أول صندوق ينجح كل الشروط
+        draw = ImageDraw.Draw(image)
+        draw.rectangle(box.tolist(), outline="green", width=3)
+        draw.line([(cx, cy), (bx, by)], fill="yellow", width=2)
+        # توضيح نسبة الخضرة على الصورة
+        draw.text((int(box[0])+4, int(box[1])+4), f"Green {green_ratio*100:.0f}%", fill="white")
+
+        os.makedirs(detected_dir, exist_ok=True)
+        out_path = os.path.join(detected_dir, f"{meter_id}.png")
+        image.save(out_path)
+
+        return FieldDetection(tuple(box.tolist()), conf, int(corrected), (flat, flon), round(edge,2), out_path, green_ratio)
+
+    # لو ما في ولا صندوق اجتاز القيود
+    return None
 
 # ======================= CDSE Token & Download =======================
 TOKEN_URL = "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token"
@@ -193,14 +222,16 @@ def get_cdse_token():
     csec = st.secrets.get("CDSE_CLIENT_SECRET")
     if not cid or not csec:
         raise RuntimeError("CDSE_CLIENT_ID / CDSE_CLIENT_SECRET غير موجودة في secrets.toml")
-    data = {"grant_type": "client_credentials", "client_id": cid, "client_secret": csec}
+    data = {"grant_type":"client_credentials","client_id":cid,"client_secret":csec}
     r = requests.post(TOKEN_URL, data=data, timeout=20)
     if r.status_code != 200:
         raise RuntimeError(f"CDSE token error {r.status_code}: {r.text[:200]}")
     js = r.json()
-    st.session_state["_cdse_token"] = js["access_token"]
-    st.session_state["_cdse_token_exp"] = time.time() + int(js.get("expires_in", 3600))
-    return js["access_token"]
+    access = js["access_token"]
+    expires = int(js.get("expires_in", 3600))
+    st.session_state["_cdse_token"] = access
+    st.session_state["_cdse_token_exp"] = time.time() + expires
+    return access
 
 def bbox_from_meters(lat: float, lon: float, size_m: float):
     half = size_m / 2.0
@@ -210,9 +241,13 @@ def bbox_from_meters(lat: float, lon: float, size_m: float):
 
 @st.cache_data(show_spinner=False, ttl=24*3600)
 def download_image(lat, lon, meter_id, timeout=30):
+    """
+    ينـزّل مشهد Sentinel-2 True Color بحجم ثابت على 640px
+    """
     img_path = os.path.join(cfg.images_dir, f"{meter_id}.png")
     if os.path.exists(img_path):
         return img_path
+
     def _request(token):
         bbox = bbox_from_meters(lat, lon, cfg.scene_size_m)
         url = "https://sh.dataspace.copernicus.eu/api/v1/process"
@@ -228,21 +263,26 @@ def download_image(lat, lon, meter_id, timeout=30):
             "output": {
                 "width": cfg.map_size[0],
                 "height": cfg.map_size[1],
-                "responses": [{"identifier": "default", "format": {"type": "image/png"}}]
+                "responses": [{"identifier":"default","format":{"type":"image/png"}}]
             },
             "evalscript": """
 //VERSION=3
 function setup(){return {input:["B04","B03","B02"],output:{bands:3}}}
-function evaluatePixel(s){return [s.B04*3.0, s.B03*3.0, s.B02*3.0]}
+function evaluatePixel(s){
+  // تخفيف التضخيم لتقليل قصّ القنوات
+  return [s.B04*1.8, s.B03*1.8, s.B02*1.8]
+}
 """
         }
         headers = {"Authorization": f"Bearer {token}"}
         return requests.post(url, headers=headers, json=payload, timeout=timeout)
+
     token = get_cdse_token()
     r = _request(token)
     if r.status_code == 401:
         token = get_cdse_token()
         r = _request(token)
+
     if r.status_code == 200:
         with open(img_path, "wb") as f:
             f.write(r.content)
@@ -273,27 +313,58 @@ if uploaded:
     if sort_order == "تصاعدي": df = df.sort_values(by="consumption", ascending=True)
     elif sort_order == "تنازلي": df = df.sort_values(by="consumption", ascending=False)
 
+    # معاينة صور فقط
+    preview_only = st.sidebar.checkbox("🖼️ عرض الصور فقط (بدون تشغيل النموذج)")
+    if st.sidebar.button("📥 تنزيل/عرض الصور"):
+        progress = st.sidebar.progress(0)
+        cols = st.columns(4)
+        shown, n, t0 = 0, len(df), time.time()
+        for i, (_, row) in enumerate(df.iterrows(), 1):
+            meter = str(row["Subscription"]); lat, lon = float(row["y"]), float(row["x"])
+            p = download_image(lat, lon, meter)
+            if p:
+                with open(p, "rb") as f: b64 = base64.b64encode(f.read()).decode()
+                cols[shown % 4].markdown(f"""
+<div style="border:1px solid #ddd;border-radius:8px;padding:6px;margin:6px;text-align:center">
+  <img src="data:image/png;base64,{b64}" width="230" style="border-radius:6px"><br>
+  <small>عداد {meter}<br>Lat {lat:.6f}, Lon {lon:.6f}</small>
+</div>""", unsafe_allow_html=True)
+                shown += 1
+            progress.progress(i / max(n,1))
+        st.sidebar.success(f"✅ تم عرض {shown} صورة في {time.time()-t0:.1f} ثانية")
+        st.stop()
+
+    # تشغيل التحليل
     if st.sidebar.button("🚀 بدء التحليل"):
         model_yolo = load_yolo(MODEL_PATH)
         risk_model = RiskModel(ML_MODEL_PATH, SCALER_PATH, cfg.risk_low, cfg.risk_high)
+
         progress = st.sidebar.progress(0)
         results, cols, col_i = [], st.columns(3), 0
-        t0, n = time.time(), len(df)
+        t0 = time.time()
+        n = len(df)
+
         for i, (_, row) in enumerate(df.iterrows(), 1):
             try:
                 meter = str(row["Subscription"])
                 lat, lon = float(row["y"]), float(row["x"])
                 br, cons, off = float(row["Breaker"]), float(row["consumption"]), str(row["Office"])
+
                 img_path = download_image(lat, lon, meter)
                 if not img_path:
-                    progress.progress(i/n); continue
-                det = detect_field(img_path, lat, lon, meter, model_yolo,
-                                   cfg.calibration_factor, cfg.min_confidence_accept,
-                                   cfg.min_area_m2, cfg.max_edge_distance_m, cfg.detected_dir)
+                    progress.progress(i / n); continue
+
+                det = detect_field(
+                    img_path, lat, lon, meter, model_yolo,
+                    cfg.calibration_factor, cfg.min_confidence_accept,
+                    cfg.min_area_m2, cfg.max_edge_distance_m, cfg.detected_dir
+                )
                 if det is None:
-                    progress.progress(i/n); continue
+                    progress.progress(i / n); continue
+
                 score, pr = risk_model.compute(br, cons, lon, lat, det.area_m2)
                 results.append([meter, pr, score, det.edge_distance_m, det.area_m2, cons, br, off, lat, lon])
+
                 with open(det.out_img_path, "rb") as f: img64 = base64.b64encode(f.read()).decode()
                 cols[col_i % 3].markdown(f"""
 <div style="border:4px solid {colors.get(pr,'#ccc')};padding:10px;border-radius:12px;margin:6px;text-align:center;">
@@ -304,10 +375,13 @@ if uploaded:
   <a href="https://maps.google.com?q={lat},{lon}">📍 الموقع</a>
 </div>""", unsafe_allow_html=True)
                 col_i += 1
-                progress.progress(i/n)
+                progress.progress(i / n)
+
             except Exception as e:
                 st.warning(f"⚠️ خطأ في العداد {row.get('Subscription','?')}: {e}")
-                progress.progress(i/n)
+                progress.progress(i / n)
+                continue
+
         if results:
             res_df = pd.DataFrame(results, columns=[
                 "Subscription","priority","risk_score","edge_distance_m","area_m2",
