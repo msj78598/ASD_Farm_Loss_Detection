@@ -1,17 +1,13 @@
-ultralytics==8.2.17
-torch==2.2.2
-torchvision==0.17.2
-scikit-learn==1.4.2
-joblib==1.4.0
-streamlit==1.34.0
-numpy==1.26.4
-pandas==2.2.2
-Pillow==10.3.0
-requests==2.32.3
-opencv-python-headless==4.9.0.80
-openpyxl==3.1.2
-geopy
+streamlit>=1.27
+pandas>=2.0
+openpyxl>=3.1
+pillow>=10.0
+geopy>=2.4
+joblib>=1.3
+ultralytics>=8.2
+scikit-learn>=1.3
 
+# مزوّد الصور الجديد
 pystac-client==0.7.6
 odc-stac==0.3.10
 rasterio==1.3.9
