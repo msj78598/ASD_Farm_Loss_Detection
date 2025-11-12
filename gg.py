@@ -14,12 +14,6 @@ sys.modules['cv2'] = __import__('cv2')
 from ultralytics import YOLO
 from geopy.distance import geodesic
 
-# ===== [إضافات مطلوبة لمصدر الصور الجديد فقط] =====
-from datetime import datetime, timedelta
-from pystac_client import Client
-from odc.stac import stac_load
-# ====================================================
-
 st.set_page_config(
     page_title="نظام اكتشاف حالات الفاقد للفئة الزراعية",
     layout="wide",
@@ -39,6 +33,44 @@ CALIBRATION_FACTOR = 0.6695
 for path in [IMG_DIR, DETECTED_DIR, OUTPUT_FOLDER]:
     os.makedirs(path, exist_ok=True)
 
+# =========================================
+# فحص وتنزيل النماذج تلقائياً
+# =========================================
+def ensure_file(path: str, url: str, min_mb: float = 5.0) -> str:
+    """يتأكد أن الملف موجود وكبير كفاية، وإلا ينزله من الرابط"""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    need = True
+    if os.path.exists(path):
+        size_mb = os.path.getsize(path) / (1024*1024)
+        if size_mb >= min_mb:
+            try:
+                with open(path, "rb") as f:
+                    head = f.read(100)
+                if b"git-lfs" not in head:
+                    need = False
+            except Exception:
+                pass
+    if need:
+        if not url:
+            raise RuntimeError(f"⚠️ ملف النموذج مفقود: {path}، ضع MODEL_URL في secrets.")
+        r = requests.get(url, timeout=180)
+        r.raise_for_status()
+        with open(path, "wb") as f:
+            f.write(r.content)
+    return path
+
+MODEL_URL = st.secrets.get("MODEL_URL", "")
+ML_MODEL_URL = st.secrets.get("ML_MODEL_URL", "")
+SCALER_URL = st.secrets.get("SCALER_URL", "")
+
+ensure_file(MODEL_PATH, MODEL_URL, min_mb=5.0)
+# يمكن تفعيلهم لو حصل نفس الخطأ
+# ensure_file(ML_MODEL_PATH, ML_MODEL_URL, min_mb=0.05)
+# ensure_file(SCALER_PATH, SCALER_URL, min_mb=0.01)
+
+# =========================================
+# تحميل النماذج
+# =========================================
 @st.cache_resource
 def load_models():
     model_yolo = YOLO(MODEL_PATH)
@@ -46,102 +78,32 @@ def load_models():
     scaler = joblib.load(SCALER_PATH)
     return model_yolo, model_ml, scaler
 
-# ============== التعديل الوحيد: استبدال مصدر الصورة ==============
-CDSE_STAC_URL = "https://catalogue.dataspace.copernicus.eu/stac"
-TOKEN_URL = "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token"
-
-def _get_cdse_token():
-    # استخدم CDSE_TOKEN إن وُجد؛ وإلا جدّد تلقائياً من CLIENT_ID/SECRET
-    tok = os.getenv("CDSE_TOKEN")
-    if tok:
-        return tok
-    cid = os.getenv("CDSE_CLIENT_ID")
-    sec = os.getenv("CDSE_CLIENT_SECRET")
-    if not cid or not sec:
-        return None
-    r = requests.post(TOKEN_URL, data={
-        "grant_type": "client_credentials",
-        "client_id": cid,
-        "client_secret": sec
-    }, timeout=30)
-    if r.ok:
-        return r.json().get("access_token")
-    return None
-
+# =========================================
+# جلب الصور (Google Static Maps أو أي مصدر)
+# =========================================
 def download_image(lat, lon, meter_id):
-    """
-    تجلب أحدث صورة Sentinel-2 L2A حول الإحداثيات، تُقصّها على مربع يماثل مجال الرؤية التقريبي
-    الذي كنت تحصل عليه من Google (zoom=16, 640x640)، وتعيد نفس ناتجك السابق: مسار PNG.
-    """
     img_path = os.path.join(IMG_DIR, f"{meter_id}.png")
     if os.path.exists(img_path):
         return img_path
+    url = "https://maps.googleapis.com/maps/api/staticmap"
+    params = {
+        "center": f"{lat},{lon}",
+        "zoom": 16,
+        "size": "640x640",
+        "maptype": "satellite",
+        "markers": f"color:red|label:X|{lat},{lon}",
+        "key": "AIzaSyAY7NJrBjS42s6upa9z_qgNLVXESuu366Q"
+    }
+    response = requests.get(url, params=params, timeout=15)
+    if response.status_code == 200:
+        with open(img_path, "wb") as f:
+            f.write(response.content)
+        return img_path
+    return None
 
-    # نحافظ على نفس "المقياس" الذي اعتمدته في detect_field (zoom=16) لثبات الحسابات
-    emulate_zoom = 16
-    gmap_mpp = 156543.03392 * math.cos(math.radians(lat)) / (2 ** emulate_zoom)  # m/px
-    half_size_m = gmap_mpp * (640 / 2.0)  # نصف عرض المربع بالمتر
-
-    # مربع القص (درجات) حول الإحداثيات
-    dlat = half_size_m / 111320.0
-    dlon = half_size_m / (111320.0 * math.cos(math.radians(lat)))
-    minx, miny, maxx, maxy = lon - dlon, lat - dlat, lon + dlon, lat + dlat
-    bbox_4326 = (minx, miny, maxx, maxy)
-
-    # تجهيز الهيدر بالتوكن (لو متوفر)
-    headers = {}
-    token = _get_cdse_token()
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-
-    # البحث عن أحدث مشهد خالٍ تقريباً من الغيوم آخر 30 يوم
-    client = Client.open(CDSE_STAC_URL, headers=headers)
-    end = datetime.utcnow()
-    start = end - timedelta(days=30)
-    search = client.search(
-        collections=["sentinel-2-l2a"],
-        bbox=bbox_4326,
-        datetime=f"{start.isoformat()}Z/{end.isoformat()}Z",
-        query={"eo:cloud_cover": {"lt": 10}}
-    )
-    items = list(search.get_items())
-    if not items:
-        return None
-
-    items.sort(key=lambda it: it.properties.get("datetime"), reverse=True)
-    item = items[0]
-
-    # تحميل الباندات (True Color) وقصّها على نفس الـ bbox
-    # نطلب resolution يساوي gmap_mpp (قد يُعاد تحجيم من 10م الأصلي، وهذا طبيعي)
-    ds = stac_load(
-        [item],
-        bands=["B04", "B03", "B02"],  # R,G,B
-        bbox=bbox_4326,
-        resolution=float(gmap_mpp),
-        chunks={}
-    )
-
-    r = ds["B04"].isel(time=0).data
-    g = ds["B03"].isel(time=0).data
-    b = ds["B02"].isel(time=0).data
-
-    # تحويل إلى uint8 [0..255]
-    def to_uint8(x):
-        x = x.astype(np.float32)
-        x = (x - np.nanmin(x)) / (np.nanmax(x) - np.nanmin(x) + 1e-6)
-        return (x * 255.0).clip(0, 255).astype(np.uint8)
-
-    rgb = np.dstack([to_uint8(r), to_uint8(g), to_uint8(b)])
-
-    # ضمان الحجم 640x640 مثل ناتج Google Static Maps (إن لم يكن كذلك)
-    h, w = rgb.shape[:2]
-    if (h, w) != (640, 640):
-        rgb = np.array(Image.fromarray(rgb).resize((640, 640), Image.BILINEAR))
-
-    Image.fromarray(rgb).save(img_path)
-    return img_path
-# ======================== نهاية التعديل ==========================
-
+# =========================================
+# تحليل الصور واكتشاف الحقول
+# =========================================
 def detect_field(img_path, lat, lon, meter_id, model_yolo):
     image = Image.open(img_path).convert("RGB")
     results = model_yolo.predict(source=image, imgsz=640, conf=0.1)[0]
@@ -160,11 +122,9 @@ def detect_field(img_path, lat, lon, meter_id, model_yolo):
     img_center_pixel = ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
     dx = (img_center_pixel[0] - 320) * scale
     dy = (img_center_pixel[1] - 320) * scale
-
     field_lat = lat - (dy / 111320)
     field_lon = lon + (dx / (40075000 * math.cos(math.radians(lat)) / 360))
 
-    # تعديل لحساب المسافة من حافة الحقل إلى العداد
     width_px = abs(box[2] - box[0])
     height_px = abs(box[3] - box[1])
     radius_px = max(width_px, height_px) / 2
@@ -182,6 +142,9 @@ def detect_field(img_path, lat, lon, meter_id, model_yolo):
     image.save(out_path)
     return round(conf * 100, 2), out_path, int(corrected_area), round(edge_distance, 2)
 
+# =========================================
+# واجهة المستخدم
+# =========================================
 st.title("🌾 نظام اكتشاف حالات الفاقد الكهربائي للفئة الزراعية")
 st.download_button("📥 تحميل نموذج البيانات (TEMPLATE.xlsx)", open(FORM_PATH, "rb"), file_name="TEMPLATE.xlsx")
 
@@ -193,8 +156,6 @@ if uploaded_file:
 
     breaker_filter = st.sidebar.selectbox("سعة القاطع", ["الكل"] + sorted(df["Breaker"].unique().tolist()))
     sort_order = st.sidebar.radio("ترتيب حسب الاستهلاك", ["بدون ترتيب", "تصاعدي", "تنازلي"])
-    
-    # خيار تجاوز الشذوذ والمعايير
     ignore_anomalies = st.sidebar.checkbox("🔍 عرض كل الحقول المكتشفة فقط (تجاهل الشذوذ والاستهلاك)")
 
     if breaker_filter != "الكل":
