@@ -23,7 +23,7 @@ import joblib
 @dataclass
 class AppConfig:
     map_size: Tuple[int, int] = (640, 640)   # أبعاد الصورة الناتجة
-    scene_size_m: int = 6400                 # عرض/ارتفاع المشهد بالأمتار (ثابت)
+    scene_size_m: int = 4000                 # عرض/ارتفاع المشهد بالأمتار (ثابت)
     calibration_factor: float = 0.6695
     min_confidence_accept: float = 0.90
     min_area_m2: float = 5000.0
