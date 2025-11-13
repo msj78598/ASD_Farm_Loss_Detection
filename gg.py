@@ -1,13 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-فاقد زراعي — YOLO + IsolationForest + Copernicus
-تحليل النمو مطابق لطريقتي:
-- NDVI مقنّع (SCL) + فلتر ضعف الإشارة + قص القمم
-- intensity_final = base_intensity × (0.5 + 0.35*cohesion + 0.15*peakiness)
-  حيث:
-    base_intensity = mean(top 20% NDVI>0)
-    cohesion = أكبر مكوّن متصل (NDVI≥0.35) / مساحة البوكس
-    peakiness = 1 - normalized entropy للهستوجرام داخل البوكس
+فاقد زراعي — YOLO + IsolationForest + Sentinel-2
+- تنزيل RGB + NDVI (FLOAT32) مع قناع SCL + فلتر الإشارة + قص القمم
+- نمو حقيقي = base_intensity × (0.5 + 0.50*cohesion + 0.15*peakiness)
+- فلتر زراعي صارم قبل الحساب (intensity/cohesion/peakiness)
+- خطر نهائي = w_breaker*r_breaker + w_consumption*r_cons + w_anomaly*r_anom + w_green*(1-intensity)
+- تصعيد فوري: نمو قوي مع خلل قاطع/استهلاك
+- فلاتر الواجهة: سعة القاطع + حد أدنى لنسبة الخطر
 """
 
 import os, io, time, base64, math, collections
@@ -41,6 +40,7 @@ class AppConfig:
     risk_low: float = 0.40
     risk_high: float = 0.70
 
+    # ملفات
     request_timeout_s: int = 30
     images_dir: str = "images"
     detected_dir: str = "DETECTED_FIELDS"
@@ -52,19 +52,24 @@ class AppConfig:
     # نمو (NDVI)
     topk_ratio: float = 0.20            # أعلى 20%
     ndvi_min_valid: float = 0.10        # أقل NDVI يُحسب نمو
-    ndvi_green_mask: float = 0.35       # قناع أخضر للمكوّنات المتصلة
+    ndvi_green_mask: float = 0.35       # حد قناع الأخضر للمكوّنات المتصلة
     ndvi_max_clip: float = 0.85         # قص القمم
-    low_signal_sum: float = 0.20        # (B08+B04) فلتر ضعف الإشارة
+    low_signal_sum: float = 0.20        # فلتر الإشارة: (B08+B04)<0.20 تُستبعد
 
     # أوزان الخطر
     w_breaker: float = 0.35
     w_consumption: float = 0.35
     w_anomaly: float = 0.15
-    w_green: float = 0.15               # خطر نباتي عكسي = 1 - intensity_final
+    w_green: float = 0.15               # خطر نباتي = 1 - intensity_final
 
     # تصعيد
     intensity_escalate_thr: float = 0.55
     escalation_score: float = 0.95
+
+    # فلتر زراعي صارم (قبل حساب الخطر)
+    pass_intensity: float = 0.55
+    pass_cohesion: float = 0.45
+    pass_peakiness: float = 0.40
 
 cfg = AppConfig()
 
@@ -118,29 +123,57 @@ class RiskModel:
         self.low_thr, self.high_thr = low_thr, high_thr
 
     @staticmethod
+    def _breaker_mismatch(area_m2: float, breaker_a: float) -> float:
+        """
+        عدم ملاءمة القاطع: لو القاطع أقل من المطلوب تُحتسب نسبة العجز.
+        المطلوب التقريبي: req = area * 0.006 A  (قابل للتعديل لاحقاً)
+        """
+        req = area_m2 * 0.006
+        if req <= 0: return 0.0
+        if breaker_a >= req: return 0.0
+        return float(np.clip((req - breaker_a) / req, 0.0, 1.0))
+
+    @staticmethod
+    def _consumption_mismatch(area_m2: float, intensity: float, consumption: float) -> float:
+        """
+        عدم ملاءمة الاستهلاك: توقع تقريبي يرتبط بالمساحة وشدة النمو.
+        exp = area * 0.004 * (0.6 + 0.8*intensity)
+        """
+        exp = area_m2 * 0.004 * (0.6 + 0.8 * float(np.clip(intensity, 0, 1)))
+        if exp <= 0: return 0.0
+        if consumption >= exp: return 0.0
+        return float(np.clip((exp - consumption) / exp, 0.0, 1.0))
+
+    @staticmethod
     def r_green(intensity_final: float) -> float:
         return float(1.0 - float(np.clip(intensity_final, 0.0, 1.0)))
 
     def compute(self, breaker, consumption, lon, lat, area_m2, intensity_final):
-        r1_base = 1.0 if breaker < area_m2 * 0.006 else 0.0
-        r2_base = 1.0 if consumption < area_m2 * 0.4 else 0.0
+        # قواعد عدم الملاءمة
+        r_breaker = self._breaker_mismatch(area_m2, breaker)
+        r_cons = self._consumption_mismatch(area_m2, intensity_final, consumption)
 
+        # شذوذ من العوامل العددية (قاطع/استهلاك/إحداثيات)
         X = np.array([[breaker, consumption, lon, lat]], dtype=float)
         Xs = self.scaler.transform(X)
         anomaly = self.model.predict(Xs)[0]
-        r3 = 1.0 if anomaly == 1 else 0.0
+        r_anom = 1.0 if anomaly == 1 else 0.0
 
-        r1 = min(1.0, r1_base * (0.6 + 1.0 * intensity_final))
-        r2 = min(1.0, r2_base * (0.6 + 1.2 * intensity_final))
-        r4 = self.r_green(intensity_final)
+        # خطر نباتي عكسي
+        r_green = self.r_green(intensity_final)
 
-        score = cfg.w_breaker*r1 + cfg.w_consumption*r2 + cfg.w_anomaly*r3 + cfg.w_green*r4
+        # تجميع مخاطر
+        score = (cfg.w_breaker * r_breaker +
+                 cfg.w_consumption * r_cons +
+                 cfg.w_anomaly * r_anom +
+                 cfg.w_green * r_green)
 
-        if intensity_final >= cfg.intensity_escalate_thr and (r1_base == 1.0 or r2_base == 1.0):
+        # تصعيد فوري: نمو قوي + خلل قاطع/استهلاك
+        if intensity_final >= cfg.intensity_escalate_thr and (r_breaker >= 0.5 or r_cons >= 0.5):
             score = max(score, cfg.escalation_score)
 
         pr = "قصوى" if score >= self.high_thr else ("متوسطة" if score >= self.low_thr else "منخفضة")
-        return score, pr
+        return score, pr, r_breaker, r_cons, r_anom, r_green
 
 # ======================= تنزيل RGB + NDVI =======================
 TOKEN_URL = "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token"
@@ -196,6 +229,7 @@ def download_rgb_and_ndvi(lat, lon, meter_id, timeout=30):
     bbox = bbox_from_meters(lat, lon, cfg.scene_size_m)
     token = get_cdse_token()
 
+    # 1) RGB
     eval_rgb = """
 //VERSION=3
 function setup(){return {input:["B04","B03","B02"],output:{bands:3}}}
@@ -205,7 +239,7 @@ function evaluatePixel(s){return [s.B04*1.8, s.B03*1.8, s.B02*1.8]}
     if r1.status_code != 200: return None, None
     with open(rgb_path, "wb") as f: f.write(r1.content)
 
-    # NDVI مع SCL + فلتر الإشارة + قص القمة
+    # 2) NDVI مع فلاتر (SCL + low-signal + upper clip)
     eval_ndvi = f"""
 //VERSION=3
 function setup(){{return {{input:["B08","B04","SCL"],output:{{bands:1,sampleType:"FLOAT32"}}}}}}
@@ -231,16 +265,15 @@ def ndvi_from_tiff(path: str) -> np.ndarray:
     return np.clip(arr, -1.0, 1.0)
 
 def _largest_connected_ratio(mask: np.ndarray) -> float:
-    """نسبة أكبر مكوّن متصل (4-اتصال) داخل القناع إلى مساحة القناع كله."""
+    """نسبة أكبر مكوّن متصل (4-اتصال) داخل القناع إلى كامل مساحة البوكس."""
     if mask.size == 0 or mask.max() == 0:
         return 0.0
     H, W = mask.shape
     seen = np.zeros_like(mask, dtype=bool)
     best = 0
     for y in range(H):
-        # تسريع بسيط: تخطى الصفوف الخالية
         row = mask[y]
-        if row.max() == 0: 
+        if row.max() == 0:
             continue
         for x in range(W):
             if mask[y, x] and not seen[y, x]:
@@ -259,7 +292,7 @@ def _largest_connected_ratio(mask: np.ndarray) -> float:
     return float(best) / float(mask.size)
 
 def _peakiness(values: np.ndarray, bins: int = 32) -> float:
-    """1 - entropy_norm؛ أعلى عندما يكون التوزيع حادًّا/مركّزًا (قمة واضحة)."""
+    """1 - entropy_norm؛ أعلى عندما يكون التوزيع حادًّا/مركّزًا."""
     if values.size == 0:
         return 0.0
     hist, _ = np.histogram(values, bins=bins, range=(0.0, 1.0), density=False)
@@ -285,15 +318,19 @@ def vegetation_signature(ndvi: np.ndarray, box: Tuple[float, float, float, float
     topk = np.partition(valid, -k)[-k:]
     base_intensity = float(np.clip(topk.mean(), 0.0, 1.0))
 
-    # (2) cohesion: أكبر مكوّن متصل
+    # (2) cohesion: أكبر مكوّن متصل داخل قناع NDVI>=ndvi_green_mask
     green_mask = (crop >= cfg.ndvi_green_mask) & (crop <= cfg.ndvi_max_clip)
     cohesion = _largest_connected_ratio(green_mask.astype(np.uint8))
 
     # (3) peakiness: 1 - entropy_norm
     peakiness = _peakiness(valid, bins=32)
 
-    # intensity_final = base × (0.5 + 0.35*cohesion + 0.15*peakiness)
-    intensity_final = base_intensity * float(np.clip(0.5 + 0.35*cohesion + 0.15*peakiness, 0.5, 1.0))
+    # intensity_final = base × (0.5 + 0.50*cohesion + 0.15*peakiness)
+    intensity_final = base_intensity * float(np.clip(0.5 + 0.50*cohesion + 0.15*peakiness, 0.5, 1.0))
+
+    # إن كان تماسك ضعيف ونمو متوسط، خفّض (منع تضخيم التربة)
+    if cohesion < 0.25 and base_intensity < 0.60:
+        intensity_final *= 0.4
 
     return float(np.clip(intensity_final, 0.0, 1.0)), float(np.clip(cohesion, 0.0, 1.0)), float(np.clip(peakiness, 0.0, 1.0))
 
@@ -350,6 +387,10 @@ def detect_field(rgb_path, ndvi_path, lat, lon, meter_id, model_yolo,
 
         intensity, cohesion, peakiness = vegetation_signature(ndvi, tuple(box.tolist()))
 
+        # ✅ فلتر زراعي صارم
+        if not (intensity >= cfg.pass_intensity and cohesion >= cfg.pass_cohesion and peakiness >= cfg.pass_peakiness):
+            continue
+
         # رسم/حفظ
         draw = ImageDraw.Draw(image)
         draw.rectangle(box.tolist(), outline="green", width=3)
@@ -381,8 +422,11 @@ if uploaded:
     df = read_excel(uploaded)
     st.sidebar.info(f"🔢 عدد الحالات: {len(df)}")
 
+    # فلاتر جانبية
     breaker_filter = st.sidebar.selectbox("سعة القاطع", ["الكل"] + sorted(df["Breaker"].unique().tolist()))
+    risk_threshold = st.sidebar.slider("عرض فقط الحالات ذات الخطر ≥", 0, 100, 60, step=5)
     sort_order = st.sidebar.radio("ترتيب حسب الاستهلاك", ["بدون ترتيب", "تصاعدي", "تنازلي"])
+
     if breaker_filter != "الكل": df = df[df["Breaker"] == breaker_filter]
     if sort_order == "تصاعدي": df = df.sort_values(by="consumption", ascending=True)
     elif sort_order == "تنازلي": df = df.sort_values(by="consumption", ascending=False)
@@ -431,7 +475,13 @@ if uploaded:
                                    cfg.min_area_m2, cfg.max_edge_distance_m, cfg.detected_dir)
                 if det is None: progress.progress(i/n); continue
 
-                score, pr = risk_model.compute(br, cons, lon, lat, det.area_m2, det.intensity)
+                score, pr, r_breaker, r_cons, r_anom, r_green = risk_model.compute(
+                    br, cons, lon, lat, det.area_m2, det.intensity
+                )
+
+                # فلتر نسبة الخطر (واجهة)
+                if score*100 < risk_threshold:
+                    progress.progress(i/n); continue
 
                 with open(det.out_img_path, "rb") as f: img64 = base64.b64encode(f.read()).decode()
                 cols[col_i % 2].markdown(f"""
@@ -440,6 +490,7 @@ if uploaded:
   <strong>عداد {meter} ({pr})</strong><br>
   خطر:{score*100:.1f}% | 🌱 نمو:{det.intensity*100:.0f}% | 🧩 تماسك:{det.cohesion*100:.0f}% | 📈 ذروة:{det.peakiness*100:.0f}%<br>
   مسافة:{det.edge_distance_m:.1f}م | مساحة:{det.area_m2}م² | استهلاك:{cons} | قاطع:{br} | مكتب:{off}<br>
+  <small>تفصيل المخاطر → قاطع:{r_breaker*100:.0f}% | استهلاك:{r_cons*100:.0f}% | شذوذ:{r_anom*100:.0f}% | نباتي:{r_green*100:.0f}%</small><br>
   <a href="https://maps.google.com?q={lat},{lon}">📍 الموقع</a>
 </div>""", unsafe_allow_html=True)
 
@@ -455,8 +506,7 @@ if uploaded:
         if results:
             res_df = pd.DataFrame(results, columns=[
                 "Subscription","priority","risk_score","edge_distance_m","area_m2",
-                "consumption","breaker","office","lat","lon",
-                "intensity","cohesion","peakiness"
+                "consumption","breaker","office","lat","lon","intensity","cohesion","peakiness"
             ])
             st.sidebar.download_button("📥 نتائج Excel", data=save_results_excel(res_df), file_name="results.xlsx")
             st.sidebar.download_button("📥 تقرير HTML", data=save_results_html(results, colors, cfg.detected_dir),
