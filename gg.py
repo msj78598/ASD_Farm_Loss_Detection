@@ -2,7 +2,7 @@
 """
 """
 
-import os, io, time, base64, math
+import os, io, time, base64, math, re
 from dataclasses import dataclass
 from typing import Tuple, List
 
@@ -46,8 +46,33 @@ def ensure_dirs(*paths):
     for p in paths:
         os.makedirs(p, exist_ok=True)
 
+def clean_meter_id(val) -> str:
+    """إرجاع رقم العداد كنص نظيف بدون .0 أو صيغة علمية أو مسافات."""
+    if pd.isna(val):
+        return ""
+    # حاول تحويله لعدد ثم رجّعه كنص صحيح بدون .0
+    try:
+        f = float(val)
+        if f.is_integer():
+            return str(int(f))
+        s = str(val).strip()
+        return re.sub(r"\.0+$", "", s)
+    except Exception:
+        s = str(val).strip()
+        # صيغة علمية (مثل 3.30601E+11) -> عدد صحيح
+        try:
+            if re.fullmatch(r"[0-9]+(\.[0-9]+)?[eE][\+\-]?\d+", s):
+                return str(int(float(s)))
+        except Exception:
+            pass
+        # إزالة .0 النهائية إن وجدت
+        s = re.sub(r"\.0+$", "", s)
+        return s
+
 def read_excel(file_obj) -> pd.DataFrame:
-    df = pd.read_excel(file_obj)
+    # نقرأ Subscription كنص ثم ننظفه
+    df = pd.read_excel(file_obj, dtype={"Subscription": str})
+    df["Subscription"] = df["Subscription"].apply(clean_meter_id)
     return df.dropna(subset=["Subscription", "Office", "Breaker", "consumption", "x", "y"])
 
 def save_results_excel(df: pd.DataFrame) -> bytes:
@@ -198,7 +223,6 @@ def detect_field(img_path, lat, lon, meter_id, model_yolo,
         draw = ImageDraw.Draw(image)
         draw.rectangle(box.tolist(), outline="green", width=3)
         draw.line([(cx, cy), (bx, by)], fill="yellow", width=2)
-        # توضيح نسبة الخضرة على الصورة
         draw.text((int(box[0])+4, int(box[1])+4), f"Green {green_ratio*100:.0f}%", fill="white")
 
         os.makedirs(detected_dir, exist_ok=True)
@@ -320,7 +344,8 @@ if uploaded:
         cols = st.columns(4)
         shown, n, t0 = 0, len(df), time.time()
         for i, (_, row) in enumerate(df.iterrows(), 1):
-            meter = str(row["Subscription"]); lat, lon = float(row["y"]), float(row["x"])
+            meter = clean_meter_id(row["Subscription"])
+            lat, lon = float(row["y"]), float(row["x"])
             p = download_image(lat, lon, meter)
             if p:
                 with open(p, "rb") as f: b64 = base64.b64encode(f.read()).decode()
@@ -346,7 +371,7 @@ if uploaded:
 
         for i, (_, row) in enumerate(df.iterrows(), 1):
             try:
-                meter = str(row["Subscription"])
+                meter = clean_meter_id(row["Subscription"])
                 lat, lon = float(row["y"]), float(row["x"])
                 br, cons, off = float(row["Breaker"]), float(row["consumption"]), str(row["Office"])
 
