@@ -96,7 +96,7 @@ def save_results_html(rows: List[List], colors: dict, detected_dir: str) -> byte
 <div style='border:4px solid {border};padding:10px;border-radius:10px;margin:6px;text-align:center;'>
   {img_tag}<br>
   <strong>عداد {meter_id} ({priority})</strong><br>
-  خطر: {risk*100:.1f}% | مسافة: {distance:.1f}م | مساحة: {area}م²<br>
+  خطر: {risk*50:.1f}% | مسافة: {distance:.1f}م | مساحة: {area}م²<br>
   الاستهلاك: {consumption} | القاطع: {breaker} | المكتب: {office}<br>
   <a href='https://maps.google.com?q={lat},{lon}'>📍 الموقع</a>
   <a href='https://wa.me/?text=عداد:{meter_id}%20الموقع:{lat},{lon}'>📲 واتساب</a>
