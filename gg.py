@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-فاقد زراعي — YOLO + IsolationForest + Copernicus (نسخة تركز على قوة النمو فقط)
-- نحسب NDVI (مع قناع SCL للسحب/الظلال/الماء)
-- intensity = متوسط أعلى 30% من قيم NDVI الموجبة داخل البوكس (تمييز للأخضر الداكن)
-- لا نستخدم التغطية إطلاقًا
-- الخطر يرتبط (مساحة/قاطع/استهلاك) + الشذوذ + intensity (عكسي) + تصعيد عند نمو قوي مع عدم ملاءمة
+فاقد زراعي — YOLO + IsolationForest + Copernicus (نسخة نمو مُحسّنة)
+- RGB للعرض + NDVI FLOAT32 للحساب
+- NDVI مُقنّع بسُحب/ظلال/ماء عبر SCL + فلتر "ضعف الإشارة" (B08+B04<0.20) + قص قمة NDVI<=0.85
+- intensity = متوسط أعلى 20% من NDVI الموجب داخل البوكس (يميز الأخضر الداكن)
+- لا نستخدم تغطية/مساحة خضراء — فقط قوة النمو + منطق هندسي (مساحة/قاطع/استهلاك) + شذوذ
+- تصعيد فوري إذا النمو قوي مع خلل قاطع/استهلاك
 """
 
 import os, io, time, base64, math
@@ -27,10 +28,14 @@ class AppConfig:
     scene_size_m: int = 2500
     calibration_factor: float = 0.6695
 
+    # YOLO
     min_confidence_accept: float = 0.45
+
+    # هندسي
     min_area_m2: float = 5000.0
     max_edge_distance_m: float = 100.0
 
+    # تصنيف الخطر
     risk_low: float = 0.40
     risk_high: float = 0.70
 
@@ -42,17 +47,19 @@ class AppConfig:
     page_title: str = "🌾 نظام اكتشاف حالات الفاقد للفئة الزراعية"
     page_icon: str = "🌾"
 
-    # NDVI (نمو فقط)
-    topk_ratio: float = 0.30        # نسبة البكسلات العليا التي نأخذ متوسطها
-    intensity_escalate_thr: float = 0.60  # نمو قوي (للتصعيد الفوري)
+    # نمو (NDVI)
+    topk_ratio: float = 0.20              # نأخذ متوسط أعلى 20% من NDVI الموجب
+    intensity_escalate_thr: float = 0.55  # نمو قوي ⇒ تصعيد عند وجود خلل
+    ndvi_min_valid: float = 0.10          # أقل NDVI نعتبره نباتًا (بعد الفلاتر)
+    ndvi_max_clip: float = 0.85           # قص القيم الشاذة العليا
 
     # أوزان الخطر
     w_breaker: float = 0.35
     w_consumption: float = 0.35
     w_anomaly: float = 0.15
-    w_green: float = 0.15           # خطر نباتي عكسي = 1 - intensity
+    w_green: float = 0.15                 # خطر نباتي عكسي = 1 - intensity
 
-    escalation_score: float = 0.90
+    escalation_score: float = 0.95
 
 cfg = AppConfig()
 
@@ -108,26 +115,27 @@ class RiskModel:
     @staticmethod
     def r_green(intensity: float) -> float:
         # خطر نباتي عكسي لقوة النمو [0..1]
-        return float(1.0 - np.clip(intensity, 0.0, 1.0))
+        return float(1.0 - float(np.clip(intensity, 0.0, 1.0)))
 
     def compute(self, breaker, consumption, lon, lat, area_m2, intensity):
         # r1/r2 قواعد هندسية
         r1_base = 1.0 if breaker < area_m2 * 0.006 else 0.0
         r2_base = 1.0 if consumption < area_m2 * 0.4 else 0.0
 
+        # شذوذ
         X = np.array([[breaker, consumption, lon, lat]], dtype=float)
         Xs = self.scaler.transform(X)
         anomaly = self.model.predict(Xs)[0]
         r3 = 1.0 if anomaly == 1 else 0.0
 
-        # نضخّم أثر الخلل كلما زادت قوة النمو
+        # تضخيم أثر الخلل مع نمو أقوى
         r1 = min(1.0, r1_base * (0.6 + 1.0 * intensity))
         r2 = min(1.0, r2_base * (0.6 + 1.2 * intensity))
         r4 = self.r_green(intensity)
 
         score = cfg.w_breaker*r1 + cfg.w_consumption*r2 + cfg.w_anomaly*r3 + cfg.w_green*r4
 
-        # تصعيد فوري: نمو قوي مع خلل قاطع/استهلاك
+        # تصعيد فوري: نمو قوي + خلل قاطع/استهلاك
         if intensity >= cfg.intensity_escalate_thr and (r1_base == 1.0 or r2_base == 1.0):
             score = max(score, cfg.escalation_score)
 
@@ -180,6 +188,11 @@ def _process(bounds_bbox, responses, evalscript, token, timeout):
 
 @st.cache_data(show_spinner=False, ttl=24*3600)
 def download_rgb_and_ndvi(lat, lon, meter_id, timeout=30):
+    """
+    ينـزّل:
+      - RGB لعرض الصورة
+      - NDVI (FLOAT32) مع فلاتر: SCL + فلتر إشارة + قص قمة
+    """
     rgb_path = os.path.join(cfg.images_dir, f"{meter_id}.png")
     ndvi_path = os.path.join(cfg.images_dir, f"{meter_id}_ndvi.tif")
     if os.path.exists(rgb_path) and os.path.exists(ndvi_path):
@@ -188,7 +201,7 @@ def download_rgb_and_ndvi(lat, lon, meter_id, timeout=30):
     bbox = bbox_from_meters(lat, lon, cfg.scene_size_m)
     token = get_cdse_token()
 
-    # RGB للعرض
+    # 1) RGB
     eval_rgb = """
 //VERSION=3
 function setup(){return {input:["B04","B03","B02"],output:{bands:3}}}
@@ -198,14 +211,18 @@ function evaluatePixel(s){return [s.B04*1.8, s.B03*1.8, s.B02*1.8]}
     if r1.status_code != 200: return None, None
     with open(rgb_path, "wb") as f: f.write(r1.content)
 
-    # NDVI مع قناع SCL (قيم سيئة = -1)
+    # 2) NDVI مع فلاتر (SCL + low-signal + upper clip)
     eval_ndvi = """
 //VERSION=3
 function setup(){return {input:["B08","B04","SCL"],output:{bands:1,sampleType:"FLOAT32"}}}
-function isBad(c){return (c==3)||(c==6)||(c==8)||(c==9)||(c==10)||(c==11);}
+function bad(c){return (c==3)||(c==6)||(c==8)||(c==9)||(c==10)||(c==11);} // ظل/ماء/سحب/ثلج
 function evaluatePixel(s){
-  var ndvi = (s.B08 - s.B04) / (s.B08 + s.B04 + 1e-6);
-  if (isBad(s.SCL)) ndvi = -1.0;
+  var sum = s.B08 + s.B04;                 // قوة الإشارة
+  var ndvi = (s.B08 - s.B04) / (sum + 1e-6);
+  // استبعاد بكسلات غير موثوقة
+  if (bad(s.SCL) || sum < 0.20) { ndvi = -1.0; }
+  // قص الطرف العلوي لمنع التضخم
+  if (ndvi > 0.85) ndvi = 0.85;
   return [ndvi];
 }
 """
@@ -229,14 +246,14 @@ def vegetation_intensity(ndvi: np.ndarray, box: Tuple[float, float, float, float
     crop = ndvi[y1:y2, x1:x2]
     if crop.size == 0: return 0.0
 
-    # خذ فقط NDVI الموجب (نبات) وتجاهل <=0 (تربة/ماء/ظل)
-    valid = crop[crop > 0.0]
+    # قيم نباتية موثوقة فقط: [0.10 .. 0.85]
+    valid = crop[(crop >= cfg.ndvi_min_valid) & (crop <= cfg.ndvi_max_clip)]
     if valid.size == 0: return 0.0
 
-    # متوسط أعلى 30% (أو أقل حسب الحجم)
+    # متوسط أعلى 20% (الأغمق/الأقوى)
     k = max(1, int(round(cfg.topk_ratio * valid.size)))
     topk = np.partition(valid, -k)[-k:]
-    intensity = float(np.clip(topk.mean(), 0.0, 1.0))  # NDVI ضمن [0..1]
+    intensity = float(np.clip(topk.mean(), 0.0, 1.0))
     return intensity
 
 # ======================= الكشف =======================
@@ -252,7 +269,7 @@ class FieldDetection:
 
 def detect_boxes(image: Image.Image, model: YOLO, min_conf=0.5):
     res = model.predict(source=image, imgsz=640, conf=min_conf, verbose=False)[0]
-    if (not res) or (not hasattr(res, "boxes")) or (res.boxes is None) or (len(res.boxes)==0):
+    if (not res) or (res.boxes is None) or (len(res.boxes)==0):
         return []
     boxes = res.boxes.xyxy.cpu().numpy()
     confs = res.boxes.conf.cpu().numpy()
@@ -288,10 +305,9 @@ def detect_field(rgb_path, ndvi_path, lat, lon, meter_id, model_yolo,
         edge = max(dist - radius_m, 0)
         if edge > max_edge_distance_m: continue
 
-        # قياس النمو فقط
         intensity = vegetation_intensity(ndvi, tuple(box.tolist()))
 
-        # رسم وحفظ
+        # رسم/حفظ
         draw = ImageDraw.Draw(image)
         draw.rectangle(box.tolist(), outline="green", width=3)
         draw.line([(cx, cy), (bx, by)], fill="yellow", width=2)
@@ -349,6 +365,7 @@ if uploaded:
         st.sidebar.success(f"✅ تم عرض {shown} صورة")
         st.stop()
 
+    # تشغيل التحليل
     if st.sidebar.button("🚀 بدء التحليل"):
         model_yolo = load_yolo(MODEL_PATH)
         risk_model = RiskModel(ML_MODEL_PATH, SCALER_PATH, cfg.risk_low, cfg.risk_high)
