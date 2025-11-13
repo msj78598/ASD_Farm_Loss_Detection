@@ -23,7 +23,7 @@ class AppConfig:
     calibration_factor: float = 0.6695
     min_confidence_accept: float = 0.45      # ← كان 0.90: خفّضناه
     min_area_m2: float = 5000.0
-    max_edge_distance_m: float = 100.0
+    max_edge_distance_m: float = 50.0        # ← المطلوب: 50 متر كحد أقصى لانزياح مركز الحقل عن العداد
     risk_low: float = 0.40
     risk_high: float = 0.70
     request_timeout_s: int = 30
@@ -50,7 +50,6 @@ def clean_meter_id(val) -> str:
     """إرجاع رقم العداد كنص نظيف بدون .0 أو صيغة علمية أو مسافات."""
     if pd.isna(val):
         return ""
-    # حاول تحويله لعدد ثم رجّعه كنص صحيح بدون .0
     try:
         f = float(val)
         if f.is_integer():
@@ -59,13 +58,11 @@ def clean_meter_id(val) -> str:
         return re.sub(r"\.0+$", "", s)
     except Exception:
         s = str(val).strip()
-        # صيغة علمية (مثل 3.30601E+11) -> عدد صحيح
         try:
             if re.fullmatch(r"[0-9]+(\.[0-9]+)?[eE][\+\-]?\d+", s):
                 return str(int(float(s)))
         except Exception:
             pass
-        # إزالة .0 النهائية إن وجدت
         s = re.sub(r"\.0+$", "", s)
         return s
 
@@ -96,7 +93,7 @@ def save_results_html(rows: List[List], colors: dict, detected_dir: str) -> byte
 <div style='border:4px solid {border};padding:10px;border-radius:10px;margin:6px;text-align:center;'>
   {img_tag}<br>
   <strong>عداد {meter_id} ({priority})</strong><br>
-  خطر: {risk*50:.1f}% | مسافة: {distance:.1f}م | مساحة: {area}م²<br>
+  خطر: {risk*100:.1f}% | مسافة: {distance:.1f}م | مساحة: {area}م²<br>
   الاستهلاك: {consumption} | القاطع: {breaker} | المكتب: {office}<br>
   <a href='https://maps.google.com?q={lat},{lon}'>📍 الموقع</a>
   <a href='https://wa.me/?text=عداد:{meter_id}%20الموقع:{lat},{lon}'>📲 واتساب</a>
@@ -212,7 +209,7 @@ def detect_field(img_path, lat, lon, meter_id, model_yolo,
         dist = geodesic((lat, lon), (flat, flon)).meters
         edge = max(dist - radius_m, 0)
         if edge > max_edge_distance_m:
-            continue
+            continue  # يستبعد أي صندوق أبعد من الحد (مثلاً > 50 م)
 
         # فلترة الخُضرة
         green_ratio = estimate_green_ratio(image, tuple(box.tolist()))
@@ -333,6 +330,10 @@ if uploaded:
 
     breaker_filter = st.sidebar.selectbox("سعة القاطع", ["الكل"] + sorted(df["Breaker"].unique().tolist()))
     sort_order = st.sidebar.radio("ترتيب حسب الاستهلاك", ["بدون ترتيب", "تصاعدي", "تنازلي"])
+
+    # منزلق حد الإزاحة (10..50 متر) — الافتراضي 50 م
+    edge_limit = st.sidebar.slider("أقصى انزياح بين مركز العداد/الحقل (متر)", 10, 50, 50, step=5)
+
     if breaker_filter != "الكل": df = df[df["Breaker"] == breaker_filter]
     if sort_order == "تصاعدي": df = df.sort_values(by="consumption", ascending=True)
     elif sort_order == "تنازلي": df = df.sort_values(by="consumption", ascending=False)
@@ -382,7 +383,7 @@ if uploaded:
                 det = detect_field(
                     img_path, lat, lon, meter, model_yolo,
                     cfg.calibration_factor, cfg.min_confidence_accept,
-                    cfg.min_area_m2, cfg.max_edge_distance_m, cfg.detected_dir
+                    cfg.min_area_m2, edge_limit, cfg.detected_dir   # 👈 نمرّر حد الإزاحة المختار (افتراضي 50م)
                 )
                 if det is None:
                     progress.progress(i / n); continue
@@ -395,7 +396,7 @@ if uploaded:
 <div style="border:4px solid {colors.get(pr,'#ccc')};padding:10px;border-radius:12px;margin:6px;text-align:center;">
   <img src="data:image/png;base64,{img64}" width="260"><br>
   <strong>عداد {meter} ({pr})</strong><br>
-  خطر:{score*100:.1f}% | مسافة:{det.edge_distance_m:.1f}م | مساحة:{det.area_m2}م²<br>
+  خطر:{score*100:.1f}% | مسافة:{det.edge_distance_m:.1f}م | مساحة:{det.area_m2}م² | خضرة:{det.green_ratio*100:.0f}%<br>
   استهلاك:{cons} | قاطع:{br} | مكتب:{off}<br>
   <a href="https://maps.google.com?q={lat},{lon}">📍 الموقع</a>
 </div>""", unsafe_allow_html=True)
