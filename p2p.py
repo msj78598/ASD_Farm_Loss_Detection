@@ -255,9 +255,10 @@ def get_month_s2_dates(lat: float, lon: float, year: int, month: int, max_items:
         "bbox": bbox,
         "collections": ["sentinel-2-l2a"],
         "datetime": dt_range,
-        "limit": max_items,
-        "sortby": [{"field": "properties.datetime", "direction": "asc"}]
+        "limit": max_items
+        # لا نستخدم sortby هنا لتفادي خطأ 400
     }
+
     headers = {"Authorization": f"Bearer {token}"}
     r = requests.post(CATALOG_URL, headers=headers, json=payload, timeout=30)
     if r.status_code != 200:
@@ -274,6 +275,7 @@ def get_month_s2_dates(lat: float, lon: float, year: int, month: int, max_items:
             dt_str = dt_str.split("T")[0]
         if dt_str:
             dates.add(dt_str)
+
     return sorted(list(dates))
 
 @st.cache_data(show_spinner=False, ttl=24*3600)
@@ -393,7 +395,7 @@ if uploaded:
         for i, (_, row) in enumerate(df.iterrows(), 1):
             meter = clean_meter_id(row["Subscription"])
             lat, lon = float(row["y"]), float(row["x"])
-            p = download_image(lat, lon, meter)  # أحدث صورة من المنصة (بدون فلتر شهر)
+            p = download_image(lat, lon, meter)  # أحدث صورة بدون فلتر شهر
             if p:
                 with open(p, "rb") as f:
                     b64 = base64.b64encode(f.read()).decode()
@@ -430,7 +432,6 @@ if uploaded:
                 # جميع تواريخ مشاهد Sentinel-2 في هذا الشهر فوق العداد
                 dates_for_meter = get_month_s2_dates(lat, lon, int(sel_year), int(sel_month))
                 if not dates_for_meter:
-                    # احتياط: لو ما وجدنا أي مشهد في الكاتالوج لهذا الشهر، لا نوقف البرنامج
                     progress.progress(i / n)
                     continue
 
@@ -447,7 +448,6 @@ if uploaded:
                         acq_date=d
                     )
                     if det is None:
-                        # نحفظ صف في السلسلة الزمنية مع خضرة صفرية لو حاب
                         ts_rows.append([meter, d, 0.0, 0, cons, br, off, lat, lon])
                         continue
 
