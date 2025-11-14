@@ -82,7 +82,7 @@ def save_results_excel(df: pd.DataFrame) -> bytes:
     buf.seek(0)
     return buf.read()
 
-# ========== NEW: إنشاء تقرير HTML للحالات مع صور التغيّر ==========
+# ========== إنشاء تقرير HTML للحالات مع صور التغيّر ==========
 def save_results_html(results: List[List],
                       gallery: dict,
                       colors: dict,
@@ -90,21 +90,35 @@ def save_results_html(results: List[List],
                       sel_month: int) -> bytes:
     """
     ينشئ صفحة HTML لكل الحالات المكتشفة،
-    مع أفضل صورة + جميع صور التغيّر (تاريخ + نسبة خضرة) لكل عداد.
+    مع أفضل صورة + جميع صور التغيّر (تاريخ + نسبة خضرة) لكل عداد،
+    مع تنسيق مناسب للطباعة (كل بطاقة لا تُقص في نصفها).
     """
     month_str = f"{sel_month:02d}/{sel_year}"
     html = [
         "<html><head><meta charset='UTF-8'>",
         "<title>تقرير الحالات المكتشفة</title>",
         "<style>",
-        "body{font-family:Tahoma,Arial,sans-serif;direction:rtl;text-align:right;background:#f7f7f7;}",
-        ".card{background:#fff;border-radius:10px;padding:12px;margin:10px;border:3px solid #ccc;}",
+        "body{font-family:Tahoma,Arial,sans-serif;direction:rtl;text-align:right;background:#f7f7f7;margin:0;padding:10px;}",
+        ".container{max-width:900px;margin:0 auto;}",
+        ".card{background:#fff;border-radius:10px;padding:12px;margin:10px 0;border:3px solid #ccc;",
+        "  page-break-inside: avoid; break-inside: avoid; -webkit-column-break-inside: avoid;}",
         ".thumbs{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;}",
-        ".thumb{border:1px solid #ddd;border-radius:8px;padding:4px;background:#fafafa;text-align:center;}",
+        ".thumb{border:1px solid #ddd;border-radius:8px;padding:4px;background:#fafafa;text-align:center;",
+        "  page-break-inside: avoid; break-inside: avoid; -webkit-column-break-inside: avoid;}",
         ".thumb img{border-radius:6px;}",
+        "h2{margin-top:0;}",
+        "@media print {",
+        "  body{background:#fff;padding:0;}",
+        "  .container{max-width:100%;margin:0 10mm;}",
+        "  .card{border:1px solid #000;margin:5mm 0;padding:5mm;font-size:11pt;}",
+        "  .thumbs{display:flex;flex-wrap:wrap;}",
+        "  .thumb{width:45%;margin-bottom:4mm;}",
+        "  img{max-width:100%;height:auto;}",
+        "}",
         "</style>",
         "</head><body>",
-        f"<h2>تقرير الحالات المكتشفة لشهر الفوترة: {month_str}</h2>"
+        "<div class='container'>",
+        f"<h2>تقرير الحالات المكتشفة لفترة الفوترة: {month_str}</h2>"
     ]
 
     for row in results:
@@ -153,7 +167,6 @@ def save_results_html(results: List[List],
         if imgs:
             html.append("<h4>صور التغيّر خلال فترة الفوترة:</h4>")
             html.append("<div class='thumbs'>")
-            # نرتب حسب التاريخ
             for info in sorted(imgs, key=lambda x: x.get("date", "")):
                 if not os.path.exists(info["img_path"]):
                     continue
@@ -174,7 +187,7 @@ def save_results_html(results: List[List],
 
         html.append("</div>")  # close card
 
-    html.append("</body></html>")
+    html.append("</div></body></html>")
     return "\n".join(html).encode("utf-8")
 
 # ======================= تحميل النماذج =======================
@@ -299,7 +312,7 @@ def detect_field(img_path, lat, lon, meter_id, model_yolo,
         os.makedirs(detected_dir, exist_ok=True)
         suffix = f"_{acq_date}" if acq_date else ""
         out_name = f"{meter_id}{suffix}.png"
-        out_path = os.path.join(cfg.detected_dir, out_name)
+        out_path = os.path.join(detected_dir, out_name)
         image.save(out_path)
 
         return FieldDetection(tuple(box.tolist()), conf, int(corrected),
@@ -619,7 +632,7 @@ if uploaded:
                 file_name="results_summary.xlsx"
             )
 
-            # NEW: تقرير HTML لكل الحالات + صور التغيّر
+            # تقرير HTML لكل الحالات + صور التغيّر
             html_bytes = save_results_html(results, gallery, colors, int(sel_year), int(sel_month))
             st.sidebar.download_button(
                 "📥 تقرير HTML للحالات المكتشفة",
