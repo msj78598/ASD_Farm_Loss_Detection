@@ -82,6 +82,101 @@ def save_results_excel(df: pd.DataFrame) -> bytes:
     buf.seek(0)
     return buf.read()
 
+# ========== NEW: إنشاء تقرير HTML للحالات مع صور التغيّر ==========
+def save_results_html(results: List[List],
+                      gallery: dict,
+                      colors: dict,
+                      sel_year: int,
+                      sel_month: int) -> bytes:
+    """
+    ينشئ صفحة HTML لكل الحالات المكتشفة،
+    مع أفضل صورة + جميع صور التغيّر (تاريخ + نسبة خضرة) لكل عداد.
+    """
+    month_str = f"{sel_month:02d}/{sel_year}"
+    html = [
+        "<html><head><meta charset='UTF-8'>",
+        "<title>تقرير الحالات المكتشفة</title>",
+        "<style>",
+        "body{font-family:Tahoma,Arial,sans-serif;direction:rtl;text-align:right;background:#f7f7f7;}",
+        ".card{background:#fff;border-radius:10px;padding:12px;margin:10px;border:3px solid #ccc;}",
+        ".thumbs{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;}",
+        ".thumb{border:1px solid #ddd;border-radius:8px;padding:4px;background:#fafafa;text-align:center;}",
+        ".thumb img{border-radius:6px;}",
+        "</style>",
+        "</head><body>",
+        f"<h2>تقرير الحالات المكتشفة لشهر الفوترة: {month_str}</h2>"
+    ]
+
+    for row in results:
+        (
+            meter_id, priority, risk_score, edge_distance_m, area_m2,
+            consumption, breaker, office, lat, lon,
+            green_mean, num_images
+        ) = row
+
+        imgs = gallery.get(meter_id, [])
+        border = colors.get(priority, "#ccc")
+
+        # اختيار أفضل صورة (أعلى خضرة) إن وجدت
+        best_img_tag = ""
+        if imgs:
+            best = max(imgs, key=lambda x: x.get("green", 0.0))
+            if os.path.exists(best["img_path"]):
+                with open(best["img_path"], "rb") as f:
+                    b64 = base64.b64encode(f.read()).decode()
+                best_img_tag = (
+                    f"<img src='data:image/png;base64,{b64}' "
+                    f"width='260' style='border-radius:8px;border:2px solid #333;'>"
+                )
+
+        html.append(f"<div class='card' style='border-color:{border};'>")
+        html.append(f"<h3>عداد {meter_id} ({priority})</h3>")
+        if best_img_tag:
+            html.append(f"<div>{best_img_tag}</div>")
+
+        html.append(
+            f"<p>"
+            f"<strong>درجة الخطر:</strong> {risk_score*100:.1f}% &nbsp; | "
+            f"<strong>مسافة الانزياح:</strong> {edge_distance_m:.1f} م &nbsp; | "
+            f"<strong>المساحة:</strong> {area_m2} م²<br>"
+            f"<strong>متوسط خضرة الشهر:</strong> {green_mean*100:.1f}% "
+            f"(من {num_images} صورة ناجحة)<br>"
+            f"<strong>الاستهلاك:</strong> {consumption} ك.و.س &nbsp; | "
+            f"<strong>سعة القاطع:</strong> {breaker} أمبير &nbsp; | "
+            f"<strong>المكتب:</strong> {office}<br>"
+            f"<strong>الإحداثيات:</strong> Lat {lat:.6f}, Lon {lon:.6f} &nbsp; "
+            f"<a href='https://maps.google.com?q={lat},{lon}'>رابط الموقع على الخريطة</a>"
+            f"</p>"
+        )
+
+        # صور التغيّر لكل تاريخ
+        if imgs:
+            html.append("<h4>صور التغيّر خلال فترة الفوترة:</h4>")
+            html.append("<div class='thumbs'>")
+            # نرتب حسب التاريخ
+            for info in sorted(imgs, key=lambda x: x.get("date", "")):
+                if not os.path.exists(info["img_path"]):
+                    continue
+                with open(info["img_path"], "rb") as f:
+                    g64 = base64.b64encode(f.read()).decode()
+                d = info.get("date", "-")
+                g = info.get("green", 0.0) * 100.0
+                a = info.get("area_m2", 0)
+                html.append(
+                    "<div class='thumb'>"
+                    f"<img src='data:image/png;base64,{g64}' width='180'><br>"
+                    f"<small>التاريخ: {d}<br>"
+                    f"الخضرة: {g:.0f}%<br>"
+                    f"المساحة: {a} م²</small>"
+                    "</div>"
+                )
+            html.append("</div>")  # close thumbs
+
+        html.append("</div>")  # close card
+
+    html.append("</body></html>")
+    return "\n".join(html).encode("utf-8")
+
 # ======================= تحميل النماذج =======================
 @st.cache_resource
 def load_yolo(model_path: str):
@@ -204,7 +299,7 @@ def detect_field(img_path, lat, lon, meter_id, model_yolo,
         os.makedirs(detected_dir, exist_ok=True)
         suffix = f"_{acq_date}" if acq_date else ""
         out_name = f"{meter_id}{suffix}.png"
-        out_path = os.path.join(detected_dir, out_name)
+        out_path = os.path.join(cfg.detected_dir, out_name)
         image.save(out_path)
 
         return FieldDetection(tuple(box.tolist()), conf, int(corrected),
@@ -511,6 +606,7 @@ if uploaded:
                 progress.progress(i / n)
                 continue
 
+        # أزرار التصدير
         if results:
             res_df = pd.DataFrame(results, columns=[
                 "Subscription","priority","risk_score","edge_distance_m","area_m2",
@@ -521,6 +617,15 @@ if uploaded:
                 "📥 نتائج ملخصة لكل عداد (Excel)",
                 data=save_results_excel(res_df),
                 file_name="results_summary.xlsx"
+            )
+
+            # NEW: تقرير HTML لكل الحالات + صور التغيّر
+            html_bytes = save_results_html(results, gallery, colors, int(sel_year), int(sel_month))
+            st.sidebar.download_button(
+                "📥 تقرير HTML للحالات المكتشفة",
+                data=html_bytes,
+                file_name="cases_report.html",
+                mime="text/html"
             )
 
         if ts_rows:
