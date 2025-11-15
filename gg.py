@@ -23,7 +23,7 @@ class AppConfig:
     calibration_factor: float = 0.6695
     min_confidence_accept: float = 0.45      # ← كان 0.90: خفّضناه
     min_area_m2: float = 5000.0
-    max_edge_distance_m: float = 50.0        # ← المطلوب: 50 متر كحد أقصى لانزياح مركز الحقل عن العداد
+    max_edge_distance_m: float = 100.0        # ← المطلوب: 50 متر كحد أقصى لانزياح مركز الحقل عن العداد
     risk_low: float = 0.40
     risk_high: float = 0.70
     request_timeout_s: int = 30
