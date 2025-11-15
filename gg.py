@@ -332,7 +332,7 @@ if uploaded:
     sort_order = st.sidebar.radio("ترتيب حسب الاستهلاك", ["بدون ترتيب", "تصاعدي", "تنازلي"])
 
     # منزلق حد الإزاحة (10..50 متر) — الافتراضي 50 م
-    edge_limit = st.sidebar.slider("أقصى انزياح بين مركز العداد/الحقل (متر)", 10, 50, 50, step=5)
+    edge_limit = st.sidebar.slider("أقصى انزياح بين مركز العداد/الحقل (متر)", 10, 50, 100, step=5)
 
     if breaker_filter != "الكل": df = df[df["Breaker"] == breaker_filter]
     if sort_order == "تصاعدي": df = df.sort_values(by="consumption", ascending=True)
