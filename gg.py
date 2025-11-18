@@ -116,7 +116,7 @@ class RiskModel:
         X = np.array([[breaker, consumption, lon, lat]], dtype=float)
         Xs = self.scaler.transform(X)
         anomaly = self.model.predict(Xs)[0]
-        r1 = 1.0 if breaker < area_m2 * 0.0015 else 0.0
+        r1 = 1.0 if breaker < area_m2 * 0.0013 else 0.0
         r2 = 1.0 if consumption < area_m2 * 0.25 else 0.0
         r3 = 1.0 if anomaly == 1 else 0.0
         score = 0.4*r1 + 0.4*r2 + 0.2*r3
