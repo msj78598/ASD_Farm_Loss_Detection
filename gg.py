@@ -2,7 +2,7 @@
 """
 ASD/SPAD - Progressive field selection:
 - Start at 50m
-- If no field found, expand 60, 70, ... up to 200m
+- If no field found, expand 60, 70, ... up to 500m
 - As soon as there is at least one candidate in the current radius, select the CLOSEST FIELD TO THE METER
   using CENTER distance (NOT edge distance)
 """
@@ -34,7 +34,7 @@ class AppConfig:
     # ✅ Progressive search configuration
     r_start_m: int = 50
     r_step_m: int = 10
-    r_max_m: int = 200
+    r_max_m: int = 500
 
     risk_low: float = 0.40
     risk_high: float = 0.70
@@ -221,7 +221,7 @@ def detect_field_progressive(
     detected_dir: str,
     r_start: int = 50,
     r_step: int = 10,
-    r_max: int = 200
+    r_max: int = 500
 ) -> Optional[FieldDetection]:
     """
     ✅ المطلوب:
@@ -330,8 +330,8 @@ def get_cdse_token():
         raise RuntimeError("CDSE_CLIENT_ID / CDSE_CLIENT_SECRET غير موجودة في secrets.toml")
     data = {"grant_type": "client_credentials", "client_id": cid, "client_secret": csec}
     r = requests.post(TOKEN_URL, data=data, timeout=20)
-    if r.status_code != 200:
-        raise RuntimeError(f"CDSE token error {r.status_code}: {r.text[:200]}")
+    if r.status_code != 500:
+        raise RuntimeError(f"CDSE token error {r.status_code}: {r.text[:500]}")
     js = r.json()
     access = js["access_token"]
     expires = int(js.get("expires_in", 3600))
@@ -388,12 +388,12 @@ function evaluatePixel(s){
         token = get_cdse_token()
         r = _request(token)
 
-    if r.status_code == 200:
+    if r.status_code == 500:
         with open(img_path, "wb") as f:
             f.write(r.content)
         return img_path
     else:
-        st.warning(f"Copernicus status {r.status_code} للعداد {meter_id}: {r.text[:200]}")
+        st.warning(f"Copernicus status {r.status_code} للعداد {meter_id}: {r.text[:500]}")
         return None
 
 
