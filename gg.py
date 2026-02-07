@@ -4,7 +4,7 @@
 
 import os, io, time, base64, math, re
 from dataclasses import dataclass
-from typing import Tuple, List
+from typing import Tuple, List, Optional
 
 import requests
 import streamlit as st
@@ -21,9 +21,14 @@ class AppConfig:
     map_size: Tuple[int, int] = (640, 640)   # أبعاد الصورة الناتجة
     scene_size_m: int = 2500                 # عرض/ارتفاع المشهد بالأمتار (ثابت)
     calibration_factor: float = 0.6695
-    min_confidence_accept: float = 0.45      # ← كان 0.90: خفّضناه
+    min_confidence_accept: float = 0.45
     min_area_m2: float = 5000.0
-    max_edge_distance_m: float = 50.0        # ← المطلوب: 50 متر كحد أقصى لانزياح مركز الحقل عن العداد
+
+    # ✅ Progressive range search (your requirement)
+    search_r_start_m: int = 50
+    search_r_step_m: int = 10
+    search_r_max_m: int = 200
+
     risk_low: float = 0.40
     risk_high: float = 0.70
     request_timeout_s: int = 30
@@ -35,9 +40,9 @@ class AppConfig:
     page_icon: str = "🌾"
 
     # ====== إعدادات فلترة “الخضرة” ======
-    green_ratio_min: float = 0.30   # ✅ 30% الحد الأدنى للخضرة
-    green_dominance: float = 1.1    # G أعلى من R و B بهذه النسبة (أقل تشددًا)
-    green_min_value: int = 60       # حد أدنى لقيمة G
+    green_ratio_min: float = 0.30
+    green_dominance: float = 1.1
+    green_min_value: int = 60
 
 cfg = AppConfig()
 
@@ -67,7 +72,6 @@ def clean_meter_id(val) -> str:
         return s
 
 def read_excel(file_obj) -> pd.DataFrame:
-    # نقرأ Subscription كنص ثم ننظفه
     df = pd.read_excel(file_obj, dtype={"Subscription": str})
     df["Subscription"] = df["Subscription"].apply(clean_meter_id)
     return df.dropna(subset=["Subscription", "Office", "Breaker", "consumption", "x", "y"])
@@ -92,11 +96,11 @@ def save_results_html(rows: List[List], colors: dict, detected_dir: str) -> byte
         html.append(f"""
 <div style='border:4px solid {border};padding:10px;border-radius:10px;margin:6px;text-align:center;'>
   {img_tag}<br>
-  <strong>عداد {meter_id} ({priority})</strong><br>
-  خطر: {risk*100:.1f}% | مسافة: {distance:.1f}م | مساحة: {area}م²<br>
-  الاستهلاك: {consumption} | القاطع: {breaker} | المكتب: {office}<br>
-  <a href='https://maps.google.com?q={lat},{lon}'>📍 الموقع</a>
-  <a href='https://wa.me/?text=عداد:{meter_id}%20الموقع:{lat},{lon}'>📲 واتساب</a>
+  <strong>Meter {meter_id} ({priority})</strong><br>
+  Risk: {risk*100:.1f}% | Dist: {distance:.1f}m | Area: {area}m²<br>
+  Cons: {consumption} | Breaker: {breaker} | Office: {office}<br>
+  <a href='https://maps.google.com?q={lat},{lon}'>📍 Maps</a>
+  <a href='https://wa.me/?text=Meter:{meter_id}%20Loc:{lat},{lon}'>📲 WhatsApp</a>
 </div>""")
     html.append("</div></body></html>")
     return "\n".join(html).encode("utf-8")
@@ -135,26 +139,24 @@ def estimate_green_ratio(image: Image.Image, box_xyxy: Tuple[float, float, float
         return 0.0
     crop = image.crop((x1, y1, x2, y2))
 
-    # ---- قناع 1: سيادة الأخضر (Dominance) ----
     arr = np.asarray(crop, dtype=np.uint8)
     if arr.size == 0:
         return 0.0
+
     R = arr[..., 0].astype(np.float32)
     G = arr[..., 1].astype(np.float32)
     B = arr[..., 2].astype(np.float32)
+
     dominance_mask = (G > R * cfg.green_dominance) & (G > B * cfg.green_dominance) & (G > cfg.green_min_value)
 
-    # ---- قناع 2: Excess Green (ExG) ----
     Rn = R / 255.0; Gn = G / 255.0; Bn = B / 255.0
     exg = 2.0 * Gn - Rn - Bn
-    exg_mask = exg > 0.08  # عتبة لطيفة
+    exg_mask = exg > 0.08
 
-    # ---- قناع 3: HSV (نطاق أخضر) ----
     hsv = crop.convert("HSV")
     H = np.asarray(hsv.getchannel(0), dtype=np.uint8)
     S = np.asarray(hsv.getchannel(1), dtype=np.uint8)
     V = np.asarray(hsv.getchannel(2), dtype=np.uint8)
-    # Hue الأخضر تقريبًا بين 35°–95° (مقياس 0..255 ≈ 25..67)
     hsv_mask = (H >= 25) & (H <= 67) & (S >= 60) & (V >= 50)
 
     green_mask = dominance_mask | exg_mask | hsv_mask
@@ -180,15 +182,29 @@ def detect_boxes(image: Image.Image, model: YOLO, min_conf=0.5):
     idxs = np.argsort(-confs)  # أعلى ثقة أولًا
     return [(boxes[i], float(confs[i])) for i in idxs]
 
-def detect_field(img_path, lat, lon, meter_id, model_yolo,
-                 calibration_factor, min_conf_accept,
-                 min_area_m2, max_edge_distance_m, detected_dir):
-    image = Image.open(img_path).convert("RGB")
+def _best_detection_within_edge_limit(
+    image: Image.Image,
+    lat: float,
+    lon: float,
+    meter_id: str,
+    model_yolo: YOLO,
+    calibration_factor: float,
+    min_conf_accept: float,
+    min_area_m2: float,
+    max_edge_distance_m: float,
+) -> Optional[FieldDetection]:
+    """
+    Returns the BEST candidate (minimum edge_distance_m) that passes all constraints,
+    within the provided max_edge_distance_m.
+    """
     candidates = detect_boxes(image, model_yolo, min_conf=min_conf_accept)
     if not candidates:
         return None
 
     m_per_px = cfg.scene_size_m / float(cfg.map_size[0])
+    cx, cy = image.width / 2, image.height / 2
+
+    best = None
 
     for box, conf in candidates:
         w_px, h_px = abs(box[2]-box[0]), abs(box[3]-box[1])
@@ -197,39 +213,110 @@ def detect_field(img_path, lat, lon, meter_id, model_yolo,
         if corrected < min_area_m2:
             continue
 
-        cx, cy = image.width/2, image.height/2
         bx, by = (box[0]+box[2])/2, (box[1]+box[3])/2
         dx_m, dy_m = (bx-cx)*m_per_px, (by-cy)*m_per_px
+
         dlat = -(dy_m / 111320.0)
         dlon = dx_m / (40075000.0 * math.cos(math.radians(lat)) / 360.0)
-        flat, flon = lat+dlat, lon+dlon
+        flat, flon = lat + dlat, lon + dlon
 
-        radius_px = max(w_px, h_px)/2
+        radius_px = max(w_px, h_px) / 2
         radius_m = radius_px * m_per_px
-        dist = geodesic((lat, lon), (flat, flon)).meters
-        edge = max(dist - radius_m, 0)
-        if edge > max_edge_distance_m:
-            continue  # يستبعد أي صندوق أبعد من الحد (مثلاً > 50 م)
 
-        # فلترة الخُضرة
+        dist_center = geodesic((lat, lon), (flat, flon)).meters
+        edge = max(dist_center - radius_m, 0.0)
+
+        if edge > max_edge_distance_m:
+            continue
+
         green_ratio = estimate_green_ratio(image, tuple(box.tolist()))
         if green_ratio < cfg.green_ratio_min:
             continue
 
-        # رسم/حفظ أول صندوق ينجح كل الشروط
-        draw = ImageDraw.Draw(image)
-        draw.rectangle(box.tolist(), outline="green", width=3)
-        draw.line([(cx, cy), (bx, by)], fill="yellow", width=2)
-        draw.text((int(box[0])+4, int(box[1])+4), f"Green {green_ratio*100:.0f}%", fill="white")
+        det = FieldDetection(
+            bbox_xyxy=tuple(box.tolist()),
+            conf=conf,
+            area_m2=int(corrected),
+            center_latlon=(flat, flon),
+            edge_distance_m=float(edge),
+            out_img_path="",   # will be filled when final chosen
+            green_ratio=green_ratio
+        )
 
-        os.makedirs(detected_dir, exist_ok=True)
-        out_path = os.path.join(detected_dir, f"{meter_id}.png")
-        image.save(out_path)
+        if (best is None) or (det.edge_distance_m < best.edge_distance_m):
+            best = det
 
-        return FieldDetection(tuple(box.tolist()), conf, int(corrected), (flat, flon), round(edge,2), out_path, green_ratio)
+    return best
 
-    # لو ما في ولا صندوق اجتاز القيود
-    return None
+def detect_field_progressive(
+    img_path: str,
+    lat: float,
+    lon: float,
+    meter_id: str,
+    model_yolo: YOLO,
+    calibration_factor: float,
+    min_conf_accept: float,
+    min_area_m2: float,
+    detected_dir: str,
+) -> Optional[FieldDetection]:
+    """
+    ✅ Progressive search:
+      R = 50, 60, 70, ..., 200
+      - Find candidates within R
+      - If any exist, choose the closest (min edge distance) and STOP
+    """
+    image = Image.open(img_path).convert("RGB")
+
+    chosen = None
+    chosen_R = None
+
+    for R in range(cfg.search_r_start_m, cfg.search_r_max_m + 1, cfg.search_r_step_m):
+        best = _best_detection_within_edge_limit(
+            image=image,
+            lat=lat,
+            lon=lon,
+            meter_id=meter_id,
+            model_yolo=model_yolo,
+            calibration_factor=calibration_factor,
+            min_conf_accept=min_conf_accept,
+            min_area_m2=min_area_m2,
+            max_edge_distance_m=R,
+        )
+        if best is not None:
+            chosen = best
+            chosen_R = R
+            break
+
+    if chosen is None:
+        return None
+
+    # Draw & save the chosen detection only
+    draw_img = image.copy()
+    draw = ImageDraw.Draw(draw_img)
+    box = chosen.bbox_xyxy
+
+    cx, cy = draw_img.width/2, draw_img.height/2
+    bx, by = (box[0]+box[2])/2, (box[1]+box[3])/2
+
+    draw.rectangle(list(box), outline="green", width=3)
+    draw.line([(cx, cy), (bx, by)], fill="yellow", width=2)
+    draw.text((int(box[0])+4, int(box[1])+4),
+              f"R<= {chosen_R}m | Green {chosen.green_ratio*100:.0f}%",
+              fill="white")
+
+    os.makedirs(detected_dir, exist_ok=True)
+    out_path = os.path.join(detected_dir, f"{meter_id}.png")
+    draw_img.save(out_path)
+
+    return FieldDetection(
+        bbox_xyxy=chosen.bbox_xyxy,
+        conf=chosen.conf,
+        area_m2=chosen.area_m2,
+        center_latlon=chosen.center_latlon,
+        edge_distance_m=round(chosen.edge_distance_m, 2),
+        out_img_path=out_path,
+        green_ratio=chosen.green_ratio,
+    )
 
 # ======================= CDSE Token & Download =======================
 TOKEN_URL = "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token"
@@ -290,7 +377,6 @@ def download_image(lat, lon, meter_id, timeout=30):
 //VERSION=3
 function setup(){return {input:["B04","B03","B02"],output:{bands:3}}}
 function evaluatePixel(s){
-  // تخفيف التضخيم لتقليل قصّ القنوات
   return [s.B04*1.8, s.B03*1.8, s.B02*1.8]
 }
 """
@@ -331,12 +417,15 @@ if uploaded:
     breaker_filter = st.sidebar.selectbox("سعة القاطع", ["الكل"] + sorted(df["Breaker"].unique().tolist()))
     sort_order = st.sidebar.radio("ترتيب حسب الاستهلاك", ["بدون ترتيب", "تصاعدي", "تنازلي"])
 
-    # منزلق حد الإزاحة (10..50 متر) — الافتراضي 50 م
-    edge_limit = st.sidebar.slider("أقصى انزياح بين مركز العداد/الحقل (متر)", 10, 50, 100, step=5)
+    st.sidebar.markdown("### 🔎 Progressive Search")
+    st.sidebar.write(f"Start: {cfg.search_r_start_m}m | Step: {cfg.search_r_step_m}m | Max: {cfg.search_r_max_m}m")
 
-    if breaker_filter != "الكل": df = df[df["Breaker"] == breaker_filter]
-    if sort_order == "تصاعدي": df = df.sort_values(by="consumption", ascending=True)
-    elif sort_order == "تنازلي": df = df.sort_values(by="consumption", ascending=False)
+    if breaker_filter != "الكل":
+        df = df[df["Breaker"] == breaker_filter]
+    if sort_order == "تصاعدي":
+        df = df.sort_values(by="consumption", ascending=True)
+    elif sort_order == "تنازلي":
+        df = df.sort_values(by="consumption", ascending=False)
 
     # معاينة صور فقط
     preview_only = st.sidebar.checkbox("🖼️ عرض الصور فقط (بدون تشغيل النموذج)")
@@ -349,14 +438,15 @@ if uploaded:
             lat, lon = float(row["y"]), float(row["x"])
             p = download_image(lat, lon, meter)
             if p:
-                with open(p, "rb") as f: b64 = base64.b64encode(f.read()).decode()
+                with open(p, "rb") as f:
+                    b64 = base64.b64encode(f.read()).decode()
                 cols[shown % 4].markdown(f"""
 <div style="border:1px solid #ddd;border-radius:8px;padding:6px;margin:6px;text-align:center">
   <img src="data:image/png;base64,{b64}" width="230" style="border-radius:6px"><br>
   <small>عداد {meter}<br>Lat {lat:.6f}, Lon {lon:.6f}</small>
 </div>""", unsafe_allow_html=True)
                 shown += 1
-            progress.progress(i / max(n,1))
+            progress.progress(i / max(n, 1))
         st.sidebar.success(f"✅ تم عرض {shown} صورة في {time.time()-t0:.1f} ثانية")
         st.stop()
 
@@ -378,20 +468,26 @@ if uploaded:
 
                 img_path = download_image(lat, lon, meter)
                 if not img_path:
-                    progress.progress(i / n); continue
+                    progress.progress(i / n)
+                    continue
 
-                det = detect_field(
+                # ✅ NEW: progressive radius selection (50..200 step 10)
+                det = detect_field_progressive(
                     img_path, lat, lon, meter, model_yolo,
                     cfg.calibration_factor, cfg.min_confidence_accept,
-                    cfg.min_area_m2, edge_limit, cfg.detected_dir   # 👈 نمرّر حد الإزاحة المختار (افتراضي 50م)
+                    cfg.min_area_m2, cfg.detected_dir
                 )
+
                 if det is None:
-                    progress.progress(i / n); continue
+                    progress.progress(i / n)
+                    continue
 
                 score, pr = risk_model.compute(br, cons, lon, lat, det.area_m2)
                 results.append([meter, pr, score, det.edge_distance_m, det.area_m2, cons, br, off, lat, lon])
 
-                with open(det.out_img_path, "rb") as f: img64 = base64.b64encode(f.read()).decode()
+                with open(det.out_img_path, "rb") as f:
+                    img64 = base64.b64encode(f.read()).decode()
+
                 cols[col_i % 3].markdown(f"""
 <div style="border:4px solid {colors.get(pr,'#ccc')};padding:10px;border-radius:12px;margin:6px;text-align:center;">
   <img src="data:image/png;base64,{img64}" width="260"><br>
@@ -400,6 +496,7 @@ if uploaded:
   استهلاك:{cons} | قاطع:{br} | مكتب:{off}<br>
   <a href="https://maps.google.com?q={lat},{lon}">📍 الموقع</a>
 </div>""", unsafe_allow_html=True)
+
                 col_i += 1
                 progress.progress(i / n)
 
@@ -414,9 +511,14 @@ if uploaded:
                 "consumption","breaker","office","lat","lon"
             ])
             st.sidebar.download_button("📥 نتائج Excel", data=save_results_excel(res_df), file_name="results.xlsx")
-            st.sidebar.download_button("📥 تقرير HTML", data=save_results_html(results, colors, cfg.detected_dir),
-                                       file_name="report.html", mime="text/html")
-        st.sidebar.success(f"⏱️ اكتمل التحليل في {round(time.time()-t0,1)} ثانية")
+            st.sidebar.download_button(
+                "📥 تقرير HTML",
+                data=save_results_html(results, colors, cfg.detected_dir),
+                file_name="report.html",
+                mime="text/html"
+            )
+
+        st.sidebar.success(f"⏱️ اكتمل التحليل في {round(time.time()-t0, 1)} ثانية")
 
 st.markdown("---")
 st.markdown("👨‍💻 **تطوير :** مشهور العباس | 00966553339838 | ")
