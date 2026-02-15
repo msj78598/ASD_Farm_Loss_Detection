@@ -117,20 +117,40 @@ class RiskModel:
         self.scaler = joblib.load(scaler_path)
         self.low_thr, self.high_thr = low_thr, high_thr
 
-    def compute(self, breaker, consumption, lon, lat, area_m2):
+    def compute(self, breaker, consumption, lon, lat, area_m2, green_ratio):
+        # 1. حساب "المساحة المزروعة فعلياً" (المساحة الكلية × نسبة الخضرة)
+        effective_area = area_m2 * green_ratio
+        
+        # 2. تشغيل نموذج الشذوذ (Anomaly)
         X = np.array([[breaker, consumption, lon, lat]], dtype=float)
         Xs = self.scaler.transform(X)
         anomaly = self.model.predict(Xs)[0]
-        r1 = 1.0 if breaker < area_m2 * 0.0013 else 0.0
-        r2 = 1.0 if consumption < area_m2 * 0.22 else 0.0
+        
+        # --- معايير الخطر الجديدة ---
+        
+        # رادع 1: هل القاطع أصغر من احتياج المساحة "المزروعة فعلياً"؟
+        # تم تعديل المعامل ليكون أكثر دقة مع المساحة الفعلية
+        r1 = 1.0 if breaker < (effective_area * 0.0015) else 0.0
+        
+        # رادع 2: هل الاستهلاك أقل من المتوقع لهذه المساحة "المزروعة فعلياً"؟
+        # (المعامل 0.25 قابل للضبط بناءً على نوع المحصول)
+        r2 = 1.0 if consumption < (effective_area * 0.25) else 0.0
+        
+        # رادع 3: هل نموذج الذكاء الاصطناعي يرى البيانات شاذة؟
         r3 = 1.0 if anomaly == 1 else 0.0
-        score = 0.4*r1 + 0.4*r2 + 0.2*r3
+        
+        # حساب النتيجة النهائية (أوزان مقترحة)
+        # أعطينا الاستهلاك الفعلي الوزن الأكبر (50%)
+        score = 0.3 * r1 + 0.5 * r2 + 0.2 * r3
+        
+        # تحديد الأولوية بناءً على الإعدادات
         if score >= self.high_thr:
             pr = "قصوى"
         elif score >= self.low_thr:
             pr = "متوسطة"
         else:
             pr = "منخفضة"
+            
         return score, pr
 
 # ======================= دالة تقدير الخضرة =======================
