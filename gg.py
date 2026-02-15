@@ -27,7 +27,7 @@ class AppConfig:
     # ✅ Progressive search by EDGE distance
     r_start_m: int = 50
     r_step_m: int = 10
-    r_max_m: int = 100
+    r_max_m: int = 150
 
     risk_low: float = 0.40
     risk_high: float = 0.70
