@@ -458,7 +458,7 @@ if uploaded:
                     progress.progress(i / n)
                     continue
 
-                score, pr = risk_model.compute(br, cons, lon, lat, det.area_m2)
+                score, pr = risk_model.compute(br, cons, lon, lat, det.area_m2, det.green_ratio)
 
                 # [meter, pr, score, edge_dist, center_dist, area, cons, br, off, lat, lon]
                 results.append([meter, pr, score, det.edge_distance_m, det.center_distance_m,
