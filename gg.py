@@ -117,20 +117,43 @@ class RiskModel:
         self.scaler = joblib.load(scaler_path)
         self.low_thr, self.high_thr = low_thr, high_thr
 
-    def compute(self, breaker, consumption, lon, lat, area_m2):
+    def compute(self, breaker, consumption, lon, lat, area_m2, green_ratio):
+        """
+        تحديث: دالة حساب مستوى المخاطر بناءً على استهلاك الكهرباء وكثافة الخضرة المكتشفة.
+        تم دمج نسبة الخضرة (green_ratio) لضمان دقة التحليل مقارنة بالمساحة الفعلية.
+        """
+        # 1. حساب المساحة الخضراء الفعلية (التي تبرر استهلاك المياه والكهرباء)
+        effective_area = area_m2 * green_ratio
+        
+        # 2. تحضير البيانات لنموذج الذكاء الاصطناعي (Isolation Forest)
         X = np.array([[breaker, consumption, lon, lat]], dtype=float)
         Xs = self.scaler.transform(X)
         anomaly = self.model.predict(Xs)[0]
-        r1 = 1.0 if breaker < area_m2 * 0.0013 else 0.0
-        r2 = 1.0 if consumption < area_m2 * 0.20 else 0.0
+        
+        # --- معايير تحديد المخاطر (Weights) ---
+        
+        # المعيار الأول (r1): هل سعة القاطع متناسبة مع المساحة الخضراء؟
+        r1 = 1.0 if breaker < (effective_area * 0.0013) else 0.0
+        
+        # المعيار الثاني (r2): هل الاستهلاك المسجل يقل عن الحد الأدنى المتوقع للمساحة الخضراء؟
+        # تم استخدام المعامل 0.20 بناءً على طلبك السابق
+        r2 = 1.0 if consumption < (effective_area * 0.20) else 0.0
+        
+        # المعيار الثالث (r3): هل الحالة تعتبر "شاذة" تقنياً وفقاً للنموذج؟
         r3 = 1.0 if anomaly == 1 else 0.0
-        score = 0.4*r1 + 0.4*r2 + 0.2*r3
+        
+        # 3. حساب النتيجة النهائية (Score) بتوزيع أوزان متوازن
+        # الاستهلاك والقاطع (40% لكل منهما) والنموذج (20%)
+        score = 0.4 * r1 + 0.4 * r2 + 0.2 * r3
+        
+        # 4. تصنيف الأولوية (Priority) بناءً على قيم Threshold المحددة في الإعدادات
         if score >= self.high_thr:
             pr = "قصوى"
         elif score >= self.low_thr:
             pr = "متوسطة"
         else:
             pr = "منخفضة"
+            
         return score, pr
 
 # ======================= دالة تقدير الخضرة =======================
