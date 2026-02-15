@@ -40,7 +40,7 @@ class AppConfig:
     page_icon: str = "🌾"
 
     # ====== إعدادات فلترة “الخضرة” ======
-    green_ratio_min: float = 0.30
+    green_ratio_min: float = 0.15
     green_dominance: float = 1.1
     green_min_value: int = 60
 
