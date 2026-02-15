@@ -2,6 +2,7 @@
 import os, io, time, base64, math, re
 from dataclasses import dataclass
 from typing import Tuple, List, Optional
+
 import requests
 import streamlit as st
 import pandas as pd
@@ -11,11 +12,11 @@ from geopy.distance import geodesic
 from ultralytics import YOLO
 import joblib
 
-# ======================= الإعدادات الاحترافية =======================
+# ======================= إعدادات ثابتة =======================
 @dataclass
 class AppConfig:
-    map_size: Tuple[int, int] = (640, 640)
-    scene_size_m: int = 2500
+    map_size: Tuple[int, int] = (640, 640)   # أبعاد الصورة الناتجة
+    scene_size_m: int = 2500                  # عرض/ارتفاع المشهد بالأمتار (ثابت)
     calibration_factor: float = 0.6695
     min_confidence_accept: float = 0.45
     min_area_m2: float = 5000.0
@@ -24,141 +25,317 @@ class AppConfig:
     r_max_m: int = 200
     risk_low: float = 0.40
     risk_high: float = 0.70
+    request_timeout_s: int = 30
     images_dir: str = "images"
     detected_dir: str = "DETECTED_FIELDS"
+    output_dir: str = "output"
     models_dir: str = "models"
-    page_title: str = "🌾 نظام الذكاء الاصطناعي لرصد الهدر الزراعي"
+    page_title: str = "🌾 نظام اكتشاف حالات الفاقد للفئة الزراعية"
+    page_icon: str = "🌾"
+    green_ratio_min: float = 0.0
+    green_dominance: float = 1.1
+    green_min_value: int = 60
 
 cfg = AppConfig()
 
-# ======================= نظام تخزين الجلسة (لحل مشكلة الالتفاف) =======================
-if 'analysis_data' not in st.session_state:
-    st.session_state.analysis_data = []
-if 'is_analyzing' not in st.session_state:
-    st.session_state.is_analyzing = False
+# ======================= تحسينات الواجهة (CSS) =======================
+st.set_page_config(page_title=cfg.page_title, page_icon=cfg.page_icon, layout="wide")
 
-# ======================= واجهة المستخدم CSS =======================
-st.set_page_config(page_title=cfg.page_title, layout="wide")
 st.markdown("""
     <style>
-    .main-card {
-        background: #ffffff; border-radius: 15px; padding: 20px; margin-bottom: 20px;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.08); display: flex; align-items: center;
-        border-right: 12px solid #ddd; transition: 0.3s;
-    }
-    .status-قصوى { border-right-color: #ff4d4d !important; background: #fff5f5; }
-    .status-متوسطة { border-right-color: #ffa500 !important; background: #fffaf0; }
-    .status-منخفضة { border-right-color: #2ecc71 !important; background: #f7fff9; }
-    .badge { padding: 6px 14px; border-radius: 20px; font-size: 13px; font-weight: bold; color: white; }
-    .badge-قصوى { background: #ff4d4d; }
-    .badge-متوسطة { background: #ffa500; }
-    .badge-منخفضة { background: #2ecc71; }
-    </style>
-""", unsafe_allow_html=True)
-
-# ======================= وظائف المعالجة الأساسية =======================
-def get_image_base64(path):
-    if os.path.exists(path):
-        with open(path, "rb") as f:
-            return base64.b64encode(f.read()).decode()
-    return ""
-
-def download_image(lat, lon, m_id):
-    path = os.path.join(cfg.images_dir, f"{m_id}.png")
-    if os.path.exists(path): return path
-    try:
-        cid, csec = st.secrets["CDSE_CLIENT_ID"], st.secrets["CDSE_CLIENT_SECRET"]
-        res = requests.post("https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token", 
-                           data={"grant_type":"client_credentials","client_id":cid,"client_secret":csec}, timeout=10)
-        token = res.json()["access_token"]
-        d = (cfg.scene_size_m/2)/111320.0
-        payload = {
-            "input": {"bounds": {"bbox": [lon-d, lat-d, lon+d, lat+d]}, "data": [{"type": "sentinel-2-l2a"}]},
-            "output": {"width": 640, "height": 640, "responses": [{"format": {"type": "image/png"}}]},
-            "evalscript": "//VERSION=3\nfunction setup(){return{input:['B04','B03','B02'],output:{bands:3}}}\nfunction evaluatePixel(s){return[s.B04*1.8,s.B03*1.8,s.B02*1.8]}"
-        }
-        r = requests.post("https://sh.dataspace.copernicus.eu/api/v1/process", headers={"Authorization": f"Bearer {token}"}, json=payload, timeout=20)
-        if r.status_code == 200:
-            with open(path, "wb") as f: f.write(r.content)
-            return path
-    except: return None
-
-# ======================= واجهة التطبيق =======================
-os.makedirs(cfg.images_dir, exist_ok=True)
-os.makedirs(cfg.detected_dir, exist_ok=True)
-
-st.title(cfg.page_title)
-file = st.file_uploader("📂 ارفع ملف الإكسل لبدء المعالجة", type=["xlsx"])
-
-if file and not st.session_state.is_analyzing:
-    df = pd.read_excel(file)
-    if st.sidebar.button("🚀 بدء التحليل الذكي"):
-        yolo = YOLO(os.path.join(cfg.models_dir, "best.pt"))
-        risk_mod = joblib.load(os.path.join(cfg.models_dir, "isolation_model.joblib"))
-        scaler = joblib.load(os.path.join(cfg.models_dir, "isolation_scaler.joblib"))
-        
-        results = []
-        bar = st.progress(0)
-        for i, (_, row) in enumerate(df.iterrows()):
-            m_id = str(row["Subscription"]).split('.')[0]
-            img_path = download_image(row["y"], row["x"], m_id)
-            if img_path:
-                # التحليل باستخدام YOLO
-                pred = yolo.predict(img_path, imgsz=640, conf=cfg.min_confidence_accept, verbose=False)[0]
-                if pred.boxes:
-                    # ✅ حساب المساحة الحقيقي بناءً على حجم البوكس المكتشف
-                    box = pred.boxes[0].xyxy.cpu().numpy()[0]
-                    w, h = abs(box[2]-box[0]), abs(box[3]-box[1])
-                    m_px = cfg.scene_size_m / 640.0
-                    calc_area = int(w * h * (m_px**2) * cfg.calibration_factor)
-                    
-                    # حساب الـ Risk
-                    X = scaler.transform([[row["Breaker"], row["consumption"], row["x"], row["y"]]])
-                    anom = risk_mod.predict(X)[0]
-                    score = (0.4 * (1.0 if row["consumption"] < (calc_area*0.2) else 0.0)) + (0.4 * (1.0 if row["Breaker"] < (calc_area*0.0013) else 0.0)) + (0.2 * (1.0 if anom == 1 else 0.0))
-                    pr = "قصوى" if score >= cfg.risk_high else "متوسطة" if score >= cfg.risk_low else "منخفضة"
-                    
-                    # حفظ الصورة
-                    out_p = os.path.join(cfg.detected_dir, f"{m_id}.png")
-                    Image.open(img_path).save(out_p) # يمكن إضافة رسم المربع هنا
-                    
-                    results.append({
-                        "m_id": m_id, "pr": pr, "score": score, "area": calc_area,
-                        "cons": row["consumption"], "br": row["Breaker"], "lat": row["y"], "lon": row["x"], "img_path": out_p
-                    })
-            bar.progress((i+1)/len(df))
-        
-        # ✅ الترتيب النهائي وتخزين الجلسة
-        results.sort(key=lambda x: x['score'], reverse=True)
-        st.session_state.analysis_data = results
-        st.session_state.is_analyzing = True
-        st.rerun()
-
-# --- عرض النتائج الثابتة ---
-if st.session_state.is_analyzing:
-    res = st.session_state.analysis_data
-    st.sidebar.success(f"✅ اكتمل التحليل: {len(res)} حالة")
+    /* تحسين الخلفية والخطوط */
+    .stApp { background-color: #f4f7f6; }
+    .main-header { color: #2e7d32; text-align: center; font-weight: bold; margin-bottom: 30px; }
     
-    # بطاقات النتائج
-    for item in res:
-        b64 = get_image_base64(item['img_path'])
-        st.markdown(f"""
-        <div class="main-card status-{item['pr']}">
-            <div style="flex: 2; padding-right: 20px;">
-                <h3 style="margin:0;">عداد: {item['m_id']} <span class="badge badge-{item['pr']}">{item['pr']}</span></h3>
-                <p style="margin: 10px 0; color: #555;">
-                    <b>خطورة:</b> {item['score']*100:.1f}% | <b>المساحة الفعالية:</b> {item['area']:,} م²<br>
-                    <b>الاستهلاك:</b> {item['cons']} | <b>القاطع:</b> {item['br']} أمبير
-                </p>
-                <a href="https://maps.google.com/?q={item['lat']},{item['lon']}" target="_blank" style="color:#007bff; text-decoration:none;">📍 موقع المزرعة</a>
-            </div>
-            <div style="flex: 1; text-align: left;">
-                <img src="data:image/png;base64,{b64}" width="220" style="border-radius:12px; border:3px solid #eee;">
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+    /* تصميم بطاقات النتائج */
+    .result-card {
+        background: white;
+        border-radius: 15px;
+        padding: 15px;
+        margin-bottom: 20px;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.05);
+        border-top: 5px solid #ddd;
+        transition: transform 0.3s;
+    }
+    .result-card:hover { transform: translateY(-5px); }
+    .priority-قصوى { border-top-color: #ff4d4d !important; }
+    .priority-متوسطة { border-top-color: #ffa500 !important; }
+    .priority-منخفضة { border-top-color: #4CAF50 !important; }
+    
+    /* تحسين الأزرار والروابط */
+    .map-link {
+        display: inline-block;
+        padding: 5px 15px;
+        background-color: #2196F3;
+        color: white !important;
+        border-radius: 20px;
+        text-decoration: none;
+        font-size: 13px;
+        margin-top: 10px;
+    }
+    .wa-link {
+        display: inline-block;
+        padding: 5px 15px;
+        background-color: #25D366;
+        color: white !important;
+        border-radius: 20px;
+        text-decoration: none;
+        font-size: 13px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
-    if st.sidebar.button("🗑️ مسح وإعادة تحميل"):
-        st.session_state.is_analyzing = False
-        st.session_state.analysis_data = []
-        st.rerun()
+# ======================= أدوات عامة =======================
+def ensure_dirs(*paths):
+    for p in paths:
+        os.makedirs(p, exist_ok=True)
+
+def clean_meter_id(val) -> str:
+    if pd.isna(val): return ""
+    try:
+        f = float(val)
+        if f.is_integer(): return str(int(f))
+        s = str(val).strip()
+        return re.sub(r"\.0+$", "", s)
+    except Exception:
+        s = str(val).strip()
+        try:
+            if re.fullmatch(r"[0-9]+(\.[0-9]+)?[eE][\+\-]?\d+", s): return str(int(float(s)))
+        except Exception: pass
+        return re.sub(r"\.0+$", "", s)
+
+def read_excel(file_obj) -> pd.DataFrame:
+    df = pd.read_excel(file_obj, dtype={"Subscription": str})
+    df["Subscription"] = df["Subscription"].apply(clean_meter_id)
+    return df.dropna(subset=["Subscription", "Office", "Breaker", "consumption", "x", "y"])
+
+def save_results_excel(df: pd.DataFrame) -> bytes:
+    buf = io.BytesIO()
+    df.to_excel(buf, index=False)
+    buf.seek(0)
+    return buf.read()
+
+def save_results_html(rows: List[List], colors: dict, detected_dir: str) -> bytes:
+    html = ["<html><head><meta charset='UTF-8'><style>body{font-family:sans-serif;background:#f0f2f5}.card{background:white;border-radius:10px;box-shadow:0 2px 5px rgba(0,0,0,0.1);margin:10px;padding:15px;width:300px;display:inline-block;vertical-align:top;border-top:5px solid}</style></head><body><div style='text-align:center;'>"]
+    for r in rows:
+        meter_id, priority, risk, edge_d, center_d, area, consumption, breaker, office, lat, lon = r
+        border = colors.get(priority, "#ccc")
+        pth = os.path.join(detected_dir, f"{meter_id}.png")
+        img_tag = ""
+        if os.path.exists(pth):
+            with open(pth, "rb") as f:
+                img_b64 = base64.b64encode(f.read()).decode()
+            img_tag = f"<img src='data:image/png;base64,{img_b64}' width='100%' style='border-radius:5px;'>"
+        html.append(f"""
+<div class='card' style='border-top-color:{border}'>
+  {img_tag}<br>
+  <h3 style='margin:10px 0'>عداد {meter_id}</h3>
+  <span style='background:{border};color:white;padding:2px 10px;border-radius:10px'>{priority}</span><br><br>
+  خطر: {risk*100:.1f}% | مساحة: {area}م²<br>
+  استهلاك: {consumption} | قاطع: {breaker}<br>
+  <div style='margin-top:10px'>
+    <a href='https://maps.google.com?q={lat},{lon}'>📍 خرائط قوقل</a>
+  </div>
+</div>""")
+    html.append("</div></body></html>")
+    return "\n".join(html).encode("utf-8")
+
+# ======================= تحميل النماذج =======================
+@st.cache_resource
+def load_yolo(model_path: str):
+    return YOLO(model_path)
+
+class RiskModel:
+    def __init__(self, model_path, scaler_path, low_thr, high_thr):
+        self.model = joblib.load(model_path)
+        self.scaler = joblib.load(scaler_path)
+        self.low_thr, self.high_thr = low_thr, high_thr
+
+    def compute(self, breaker, consumption, lon, lat, area_m2, green_ratio):
+        effective_area = area_m2 * green_ratio
+        X = np.array([[breaker, consumption, lon, lat]], dtype=float)
+        Xs = self.scaler.transform(X)
+        anomaly = self.model.predict(Xs)[0]
+        r1 = 1.0 if breaker < (effective_area * 0.0013) else 0.0
+        r2 = 1.0 if consumption < (effective_area * 0.20) else 0.0
+        r3 = 1.0 if anomaly == 1 else 0.0
+        score = 0.4 * r1 + 0.4 * r2 + 0.2 * r3
+        if score >= self.high_thr: pr = "قصوى"
+        elif score >= self.low_thr: pr = "متوسطة"
+        else: pr = "منخفضة"
+        return score, pr
+
+# ======================= دالة تقدير الخضرة =======================
+def estimate_green_ratio(image: Image.Image, box_xyxy: Tuple[float, float, float, float]) -> float:
+    x1, y1, x2, y2 = [int(v) for v in box_xyxy]
+    if x2 <= x1 or y2 <= y1: return 0.0
+    crop = image.crop((x1, y1, x2, y2))
+    arr = np.asarray(crop, dtype=np.uint8)
+    if arr.size == 0: return 0.0
+    R, G, B = arr[..., 0].astype(np.float32), arr[..., 1].astype(np.float32), arr[..., 2].astype(np.float32)
+    dominance_mask = (G > R * cfg.green_dominance) & (G > B * cfg.green_dominance) & (G > cfg.green_min_value)
+    Rn, Gn, Bn = R / 255.0, G / 255.0, B / 255.0
+    exg = 2.0 * Gn - Rn - Bn
+    exg_mask = exg > 0.08
+    hsv = crop.convert("HSV")
+    H, S, V = np.asarray(hsv.getchannel(0)), np.asarray(hsv.getchannel(1)), np.asarray(hsv.getchannel(2))
+    hsv_mask = (H >= 25) & (H <= 67) & (S >= 60) & (V >= 50)
+    green_mask = dominance_mask | exg_mask | hsv_mask
+    return float(green_mask.mean())
+
+# ======================= الكشف =======================
+@dataclass
+class FieldDetection:
+    bbox_xyxy: Tuple[float, float, float, float]; conf: float; area_m2: int; center_latlon: Tuple[float, float]
+    edge_distance_m: float; center_distance_m: float; out_img_path: str; green_ratio: float
+
+def detect_boxes(image: Image.Image, model: YOLO, min_conf=0.5):
+    res = model.predict(source=image, imgsz=640, conf=min_conf, verbose=False)[0]
+    if not res or not res.boxes: return []
+    boxes = res.boxes.xyxy.cpu().numpy()
+    confs = res.boxes.conf.cpu().numpy()
+    idxs = np.argsort(-confs)
+    return [(boxes[i], float(confs[i])) for i in idxs]
+
+def detect_field_progressive(img_path, lat, lon, meter_id, model_yolo, calibration_factor, min_conf_accept, min_area_m2, detected_dir, r_start=50, r_step=10, r_max=200):
+    image = Image.open(img_path).convert("RGB")
+    boxes = detect_boxes(image, model_yolo, min_conf=min_conf_accept)
+    if not boxes: return None
+    m_per_px = cfg.scene_size_m / float(cfg.map_size[0])
+    cx, cy = image.width / 2, image.height / 2
+    candidates = []
+    for box, conf in boxes:
+        w_px, h_px = abs(box[2]-box[0]), abs(box[3]-box[1])
+        area = w_px * h_px * (m_per_px**2)
+        corrected = area * calibration_factor
+        if corrected < min_area_m2: continue
+        bx, by = (box[0]+box[2])/2, (box[1]+box[3])/2
+        dx_m, dy_m = (bx-cx)*m_per_px, (by-cy)*m_per_px
+        dlat, dlon = -(dy_m / 111320.0), dx_m / (40075000.0 * math.cos(math.radians(lat)) / 360.0)
+        flat, flon = lat + dlat, lon + dlon
+        center_dist = geodesic((lat, lon), (flat, flon)).meters
+        green_ratio = estimate_green_ratio(image, tuple(box.tolist()))
+        if green_ratio < cfg.green_ratio_min: continue
+        radius_m = (max(w_px, h_px) / 2) * m_per_px
+        edge_dist = max(center_dist - radius_m, 0.0)
+        candidates.append((edge_dist, center_dist, box, conf, int(corrected), (flat, flon), green_ratio))
+    if not candidates: return None
+    chosen, chosen_R = None, None
+    for R in range(r_start, r_max + 1, r_step):
+        within = [c for c in candidates if c[0] <= R]
+        if within:
+            chosen, chosen_R = min(within, key=lambda x: (x[0], x[1])), R
+            break
+    if chosen is None: return None
+    edge_dist, center_dist, box, conf, area_m2, (flat, flon), green_ratio = chosen
+    draw = ImageDraw.Draw(image)
+    draw.rectangle(box.tolist(), outline="green", width=3)
+    draw.line([(cx, cy), ((box[0]+box[2])/2, (box[1]+box[3])/2)], fill="yellow", width=2)
+    os.makedirs(detected_dir, exist_ok=True)
+    out_path = os.path.join(detected_dir, f"{meter_id}.png")
+    image.save(out_path)
+    return FieldDetection(tuple(box.tolist()), float(conf), int(area_m2), (flat, flon), float(edge_dist), float(center_dist), out_path, float(green_ratio))
+
+# ======================= CDSE Token & Download =======================
+TOKEN_URL = "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token"
+def get_cdse_token():
+    tok, exp = st.session_state.get("_cdse_token"), st.session_state.get("_cdse_token_exp", 0)
+    if tok and time.time() < exp - 60: return tok
+    cid, csec = st.secrets.get("CDSE_CLIENT_ID"), st.secrets.get("CDSE_CLIENT_SECRET")
+    if not cid or not csec: raise RuntimeError("Missing Secrets")
+    r = requests.post(TOKEN_URL, data={"grant_type":"client_credentials","client_id":cid,"client_secret":csec}, timeout=20)
+    js = r.json()
+    access, expires = js["access_token"], int(js.get("expires_in", 3600))
+    st.session_state["_cdse_token"], st.session_state["_cdse_token_exp"] = access, time.time() + expires
+    return access
+
+@st.cache_data(show_spinner=False, ttl=24*3600)
+def download_image(lat, lon, meter_id, timeout=30):
+    img_path = os.path.join(cfg.images_dir, f"{meter_id}.png")
+    if os.path.exists(img_path): return img_path
+    def _request(token):
+        half = cfg.scene_size_m / 2.0
+        dlat, dlon = half / 111320.0, half / (111320.0 * math.cos(math.radians(lat)))
+        bbox = [lon - dlon, lat - dlat, lon + dlon, lat + dlat]
+        payload = {"input": {"bounds": {"bbox": bbox}, "data": [{"type": "sentinel-2-l2a"}]}, "output": {"width": cfg.map_size[0], "height": cfg.map_size[1], "responses": [{"format":{"type":"image/png"}}] }, "evalscript": "//VERSION=3\nfunction setup(){return {input:['B04','B03','B02'],output:{bands:3}}}\nfunction evaluatePixel(s){return [s.B04*1.8, s.B03*1.8, s.B02*1.8]}"}
+        return requests.post("https://sh.dataspace.copernicus.eu/api/v1/process", headers={"Authorization": f"Bearer {token}"}, json=payload, timeout=timeout)
+    token = get_cdse_token()
+    r = _request(token)
+    if r.status_code == 200:
+        with open(img_path, "wb") as f: f.write(r.content)
+        return img_path
+    return None
+
+# ======================= واجهة Streamlit =======================
+ensure_dirs(cfg.images_dir, cfg.detected_dir, cfg.output_dir, cfg.models_dir)
+MODEL_PATH, ML_MODEL_PATH, SCALER_PATH = os.path.join(cfg.models_dir, "best.pt"), os.path.join(cfg.models_dir, "isolation_model.joblib"), os.path.join(cfg.models_dir, "isolation_scaler.joblib")
+
+st.markdown(f"<h1 class='main-header'>{cfg.page_title}</h1>", unsafe_allow_html=True)
+
+with st.sidebar:
+    st.image("https://cdn-icons-png.flaticon.com/512/2942/2942254.png", width=100)
+    uploaded = st.file_uploader("📁 رفع ملف البيانات (Excel)", type=["xlsx"])
+    colors = {"قصوى": "#ff4d4d", "متوسطة": "#ffa500", "منخفضة": "#4CAF50"}
+
+if uploaded:
+    df = read_excel(uploaded)
+    with st.sidebar:
+        st.write(f"📊 إجمالي السجلات: **{len(df)}**")
+        breaker_filter = st.selectbox("تصفية حسب القاطع", ["الكل"] + sorted(df["Breaker"].unique().tolist()))
+        sort_order = st.radio("ترتيب الاستهلاك", ["بدون ترتيب", "تصاعدي", "تنازلي"])
+        if breaker_filter != "الكل": df = df[df["Breaker"] == breaker_filter]
+        if sort_order == "تصاعدي": df = df.sort_values(by="consumption")
+        elif sort_order == "تنازلي": df = df.sort_values(by="consumption", ascending=False)
+        
+        btn_preview = st.button("🖼️ عرض الصور فقط", use_container_width=True)
+        btn_analyze = st.button("🚀 بدء التحليل المتكامل", use_container_width=True)
+
+    if btn_preview:
+        cols = st.columns(4)
+        for i, (_, row) in enumerate(df.iterrows()):
+            meter, lat, lon = clean_meter_id(row["Subscription"]), float(row["y"]), float(row["x"])
+            p = download_image(lat, lon, meter)
+            if p:
+                with open(p, "rb") as f: b64 = base64.b64encode(f.read()).decode()
+                cols[i%4].markdown(f"<div class='result-card'><img src='data:image/png;base64,{b64}' width='100%'><br><small>عداد: {meter}</small></div>", unsafe_allow_html=True)
+
+    if btn_analyze:
+        model_yolo, risk_model = load_yolo(MODEL_PATH), RiskModel(ML_MODEL_PATH, SCALER_PATH, cfg.risk_low, cfg.risk_high)
+        results, col_idx, ui_cols = [], 0, st.columns(3)
+        progress_bar = st.progress(0)
+        
+        for i, (_, row) in enumerate(df.iterrows(), 1):
+            try:
+                meter, lat, lon = clean_meter_id(row["Subscription"]), float(row["y"]), float(row["x"])
+                br, cons, off = float(row["Breaker"]), float(row["consumption"]), str(row["Office"])
+                img_path = download_image(lat, lon, meter)
+                if not img_path: continue
+                det = detect_field_progressive(img_path, lat, lon, meter, model_yolo, cfg.calibration_factor, cfg.min_confidence_accept, cfg.min_area_m2, cfg.detected_dir)
+                if det:
+                    score, pr = risk_model.compute(br, cons, lon, lat, det.area_m2, det.green_ratio)
+                    results.append([meter, pr, score, det.edge_distance_m, det.center_distance_m, det.area_m2, cons, br, off, lat, lon])
+                    with open(det.out_img_path, "rb") as f: img64 = base64.b64encode(f.read()).decode()
+                    
+                    ui_cols[col_idx % 3].markdown(f"""
+                        <div class="result-card priority-{pr}">
+                            <img src="data:image/png;base64,{img64}" width="100%" style="border-radius:10px">
+                            <div style="text-align:right; direction:rtl; margin-top:10px">
+                                <b>العداد:</b> {meter} <br>
+                                <b>الأولوية:</b> <span style="color:{colors[pr]}">{pr}</span> <br>
+                                <b>نسبة الخطر:</b> {score*100:.1f}% <br>
+                                <b>المساحة:</b> {det.area_m2} م² <br>
+                                <a class="map-link" href="https://maps.google.com?q={lat},{lon}">📍 خرائط قوقل</a>
+                                <a class="wa-link" href="https://wa.me/?text=عداد:{meter}%20مساحة:{det.area_m2}">📲 واتساب</a>
+                            </div>
+                        </div>
+                    """, unsafe_allow_html=True)
+                    col_idx += 1
+                progress_bar.progress(i / len(df))
+            except Exception as e: st.error(f"Error {meter}: {e}")
+
+        if results:
+            res_df = pd.DataFrame(results, columns=["Subscription","priority","risk_score","edge_distance_m","center_distance_m","area_m2","consumption","breaker","office","lat","lon"])
+            st.sidebar.download_button("📥 تحميل النتائج Excel", data=save_results_excel(res_df), file_name="results.xlsx", use_container_width=True)
+            st.sidebar.download_button("📥 تحميل تقرير HTML", data=save_results_html(results, colors, cfg.detected_dir), file_name="report.html", use_container_width=True)
+
+st.markdown("<br><hr><center>👨‍💻 تطوير: مشهور العباس 2026 | 00966553339838</center>", unsafe_allow_html=True)
