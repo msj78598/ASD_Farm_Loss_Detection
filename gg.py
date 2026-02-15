@@ -27,7 +27,7 @@ class AppConfig:
     # ✅ Progressive search by EDGE distance
     r_start_m: int = 50
     r_step_m: int = 10
-    r_max_m: int = 150
+    r_max_m: int = 200
 
     risk_low: float = 0.40
     risk_high: float = 0.70
@@ -473,4 +473,4 @@ if uploaded:
         st.sidebar.success(f"⏱️ اكتمل التحليل في {round(time.time()-t0,1)} ثانية")
 
 st.markdown("---")
-st.markdown("👨‍💻 **تطوير :** مشهور العباس | 00966553339838 | ")
+st.markdown("👨‍💻 **تطوير :** مشهور العباس 2026 | 00966553339838 | ")
