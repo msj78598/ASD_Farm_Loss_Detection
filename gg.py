@@ -45,9 +45,9 @@ class AppConfig:
     min_area_m2: float = 5000.0
 
     # ✅ Progressive search by EDGE distance
-    r_start_m: int = 50
+    r_start_m: int = 0
     r_step_m: int = 10
-    r_max_m: int = 200
+    r_max_m: int = 50
 
     # عتبات تصنيف المخاطر
     risk_low: float = 0.40
