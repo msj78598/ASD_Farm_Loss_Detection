@@ -1,17 +1,4 @@
-سأعطيك نسخة محسّنة كاملة في ملف واحد (كما طلبت)، لكنها تحتوي على معظم التعديلات المقترحة، مع الحفاظ على نفس منطق العمل الأصلي.
-
-التعديلات المضافة باختصار داخل نفس الملف:
-• تحسين الـ imports وتنظيمها.
-• جعل معاملات RiskModel في AppConfig بدل أرقام ثابتة.
-• تحسين estimategreenratio بتقليل التكرار (تحويل HSV للصورة مرة واحدة).
-• إضافة إمكانية تعديل بعض الإعدادات من واجهة Streamlit (thresholds رئيسية).
-• تحسين HTML وواجهة العرض، مع دالة مساعدة لعرض بطاقة النتيجة.
-• إضافة تسجيل (logging) أساسي للأخطاء.
-
-> ملاحظة: هذا الكود يفترض نفس الملفات والنماذج (best.pt, isolationmodel.joblib, isolationscaler.joblib) موجودة تحت models/ كما في نسختك الأصلية.
-
-``python
--- coding: utf-8 --
+# -*- coding: utf-8 -*-
 """
 Streamlit app for detecting agricultural water/electricity loss cases
 with Sentinel-2 images + YOLO detection + Isolation Forest risk model.
@@ -36,76 +23,78 @@ from geopy.distance import geodesic
 from ultralytics import YOLO
 import joblib
 
-======================= إعداد اللوجر =======================
+# ======================= إعداد اللوجر =======================
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
-logger = logging.getLogger(name)
+logger = logging.getLogger(__name__)
 
-======================= إعدادات ثابتة =======================
+# ======================= إعدادات ثابتة =======================
 @dataclass
 class AppConfig:
     # أبعاد الصورة الناتجة من Sentinel
-    mapsize: Tuple[int, int] = (640, 640)
+    map_size: Tuple[int, int] = (640, 640)
     # عرض/ارتفاع المشهد بالأمتار (ثابت)
-    scenesizem: int = 2500
+    scene_size_m: int = 2500
     # معامل معايرة المساحة
-    calibrationfactor: float = 0.6695
+    calibration_factor: float = 0.6695
     # أدنى ثقة لقبول صندوق YOLO
-    minconfidenceaccept: float = 0.45
+    min_confidence_accept: float = 0.45
     # أدنى مساحة (م²) لقبول الحقل
-    minaream2: float = 5000.0
+    min_area_m2: float = 5000.0
 
     # ✅ Progressive search by EDGE distance
-    rstartm: int = 50
-    rstepm: int = 10
-    rmaxm: int = 200
+    r_start_m: int = 50
+    r_step_m: int = 10
+    r_max_m: int = 200
 
     # عتبات تصنيف المخاطر
-    risklow: float = 0.40
-    riskhigh: float = 0.70
+    risk_low: float = 0.40
+    risk_high: float = 0.70
 
     # إعدادات الاتصال بـ Copernicus
-    requesttimeouts: int = 30
+    request_timeout_s: int = 30
 
     # مجلدات العمل
-    imagesdir: str = "images"
-    detecteddir: str = "DETECTEDFIELDS"
-    outputdir: str = "output"
-    modelsdir: str = "models"
+    images_dir: str = "images"
+    detected_dir: str = "DETECTED_FIELDS"
+    output_dir: str = "output"
+    models_dir: str = "models"
 
     # إعدادات صفحة Streamlit
-    pagetitle: str = "🌾 نظام اكتشاف حالات الفاقد للفئة الزراعية"
-    pageicon: str = "🌾"
+    page_title: str = "🌾 نظام اكتشاف حالات الفاقد للفئة الزراعية"
+    page_icon: str = "🌾"
 
     # ====== إعدادات فلترة “الخضرة” ======
-    greenratiomin: float = 0.0
-    greendominance: float = 1.1
-    greenminvalue: int = 60
+    green_ratio_min: float = 0.0
+    green_dominance: float = 1.1
+    green_min_value: int = 60
 
     # ====== إعدادات نموذج المخاطر (بدلاً من أرقام ثابتة داخل الكود) ======
-    breakerareacoef: float = 0.0013  # معامل علاقة سعة القاطع بالمساحة الخضراء
-    minconscoef: float = 0.20        # الحد الأدنى للاستهلاك بالنسبة للمساحة الخضراء
-    wr1: float = 0.4                  # وزن معيار القاطع
-    wr2: float = 0.4                  # وزن معيار الاستهلاك
-    wr3: float = 0.2                  # وزن نموذج العزلة (Isolation Forest)
+    breaker_area_coef: float = 0.0013  # معامل علاقة سعة القاطع بالمساحة الخضراء
+    min_cons_coef: float = 0.20        # الحد الأدنى للاستهلاك بالنسبة للمساحة الخضراء
+    w_r1: float = 0.4                  # وزن معيار القاطع
+    w_r2: float = 0.4                  # وزن معيار الاستهلاك
+    w_r3: float = 0.2                  # وزن نموذج العزلة (Isolation Forest)
+
 
 cfg = AppConfig()
 
-======================= أدوات عامة =======================
-def ensuredirs(paths: str) -> None:
+# ======================= أدوات عامة =======================
+def ensure_dirs(*paths: str) -> None:
     """إنشاء المجلدات المطلوبة إن لم تكن موجودة."""
     for p in paths:
-        os.makedirs(p, existok=True)
+        os.makedirs(p, exist_ok=True)
 
-def cleanmeterid(val) -> str:
+
+def clean_meter_id(val) -> str:
     """إرجاع رقم العداد كنص نظيف بدون .0 أو صيغة علمية أو مسافات."""
     if pd.isna(val):
         return ""
     try:
         f = float(val)
-        if f.isinteger():
+        if f.is_integer():
             return str(int(f))
         s = str(val).strip()
         return re.sub(r"\.0+$", "", s)
@@ -120,24 +109,27 @@ def cleanmeterid(val) -> str:
         s = re.sub(r"\.0+$", "", s)
         return s
 
-def readexcel(fileobj) -> pd.DataFrame:
+
+def read_excel(file_obj) -> pd.DataFrame:
     """قراءة ملف الإكسل وتحضير البيانات الأساسية."""
-    df = pd.readexcel(fileobj, dtype={"Subscription": str})
-    df["Subscription"] = df["Subscription"].apply(cleanmeterid)
+    df = pd.read_excel(file_obj, dtype={"Subscription": str})
+    df["Subscription"] = df["Subscription"].apply(clean_meter_id)
     # حذف الصفوف التي لا تحتوي على بيانات أساسية مطلوبة
     return df.dropna(subset=["Subscription", "Office", "Breaker", "consumption", "x", "y"])
 
-def saveresultsexcel(df: pd.DataFrame) -> bytes:
+
+def save_results_excel(df: pd.DataFrame) -> bytes:
     """تصدير النتائج إلى ملف Excel في الذاكرة."""
     buf = io.BytesIO()
-    df.toexcel(buf, index=False)
+    df.to_excel(buf, index=False)
     buf.seek(0)
     return buf.read()
 
-def saveresultshtml(rows: List[List], colors: dict, detecteddir: str) -> bytes:
+
+def save_results_html(rows: List[List], colors: dict, detected_dir: str) -> bytes:
     """
     توليد تقرير HTML بسيط يحتوي على صور الحقول وبياناتها.
-    rows: [meter, pr, score, edged, centerd, area, cons, br, off, lat, lon]
+    rows: [meter, pr, score, edge_d, center_d, area, cons, br, off, lat, lon]
     """
     from html import escape
 
@@ -149,32 +141,33 @@ def saveresultshtml(rows: List[List], colors: dict, detecteddir: str) -> bytes:
         "</style></head><body><div style='display:flex;flex-wrap:wrap;'>"
     ]
     for r in rows:
-        meterid, priority, risk, edged, centerd, area, consumption, breaker, office, lat, lon = r
+        meter_id, priority, risk, edge_d, center_d, area, consumption, breaker, office, lat, lon = r
         border = colors.get(priority, "#ccc")
-        pth = os.path.join(detecteddir, f"{meterid}.png")
-        imgtag = ""
+        pth = os.path.join(detected_dir, f"{meter_id}.png")
+        img_tag = ""
         if os.path.exists(pth):
             with open(pth, "rb") as f:
-                imgb64 = base64.b64encode(f.read()).decode()
-            imgtag = (
-                f"<img src='data:image/png;base64,{imgb64}' "
+                img_b64 = base64.b64encode(f.read()).decode()
+            img_tag = (
+                f"<img src='data:image/png;base64,{img_b64}' "
                 f"width='250' class='img'>"
             )
 
         html.append(f"""
 <div class='card' style='border:4px solid {border};'>
-  {imgtag}<br>
-  <strong>عداد {escape(str(meterid))} ({escape(str(priority))})</strong><br>
-  خطر: {risk100:.1f}% | حافة: {edged:.1f}م | مركز: {centerd:.1f}م | مساحة: {area}م²<br>
+  {img_tag}<br>
+  <strong>عداد {escape(str(meter_id))} ({escape(str(priority))})</strong><br>
+  خطر: {risk*100:.1f}% | حافة: {edge_d:.1f}م | مركز: {center_d:.1f}م | مساحة: {area}م²<br>
   الاستهلاك: {consumption} | القاطع: {breaker} | المكتب: {escape(str(office))}<br>
   <a href='https://maps.google.com?q={lat},{lon}'>📍 الموقع</a>
   &nbsp;|&nbsp;
-  <a href='https://wa.me/?text=عداد:{meterid}%20الموقع:{lat},{lon}'>📲 واتساب</a>
+  <a href='https://wa.me/?text=عداد:{meter_id}%20الموقع:{lat},{lon}'>📲 واتساب</a>
 </div>""")
     html.append("</div></body></html>")
     return "\n".join(html).encode("utf-8")
 
-def makeresultcardhtml(
+
+def make_result_card_html(
     meter: str,
     pr: str,
     score: float,
@@ -184,50 +177,52 @@ def makeresultcardhtml(
     off: str,
     lat: float,
     lon: float,
-    bordercolor: str,
+    border_color: str,
 ) -> str:
     """توليد HTML لعرض بطاقة نتيجة واحدة في Streamlit."""
-    with open(det.outimgpath, "rb") as f:
+    with open(det.out_img_path, "rb") as f:
         img64 = base64.b64encode(f.read()).decode()
 
-    cardhtml = f"""
-<div style="border:4px solid {bordercolor};padding:10px;border-radius:12px;margin:6px;text-align:center;">
+    card_html = f"""
+<div style="border:4px solid {border_color};padding:10px;border-radius:12px;margin:6px;text-align:center;">
   <img src="data:image/png;base64,{img64}" width="260" style="border-radius:8px;"><br>
   <strong>عداد {meter} ({pr})</strong><br>
-  خطر:{score100:.1f}% | حافة:{det.edgedistancem:.1f}م | مركز:{det.centerdistancem:.1f}م<br>
-  مساحة:{det.aream2}م² | خضرة:{det.greenratio100:.0f}%<br>
+  خطر:{score*100:.1f}% | حافة:{det.edge_distance_m:.1f}م | مركز:{det.center_distance_m:.1f}م<br>
+  مساحة:{det.area_m2}م² | خضرة:{det.green_ratio*100:.0f}%<br>
   استهلاك:{cons} | قاطع:{br} | مكتب:{off}<br>
   <a href="https://maps.google.com?q={lat},{lon}">📍 الموقع</a>
 </div>
 """
-    return cardhtml
+    return card_html
 
-======================= تحميل النماذج =======================
-@st.cacheresource
-def loadyolo(modelpath: str):
+
+# ======================= تحميل النماذج =======================
+@st.cache_resource
+def load_yolo(model_path: str):
     """تحميل نموذج YOLO مرة واحدة لكل جلسة."""
-    logger.info(f"Loading YOLO model from {modelpath}")
-    return YOLO(modelpath)
+    logger.info(f"Loading YOLO model from {model_path}")
+    return YOLO(model_path)
+
 
 class RiskModel:
     """
     نموذج حساب مستوى المخاطر:
     - يستخدم Isolation Forest + قواعد منطقية تعتمد على:
-       سعة القاطع
-       الاستهلاك
-       المساحة الخضراء الفعلية
+      * سعة القاطع
+      * الاستهلاك
+      * المساحة الخضراء الفعلية
     """
 
-    def init(self, modelpath: str, scalerpath: str, config: AppConfig):
-        self.model = joblib.load(modelpath)
-        self.scaler = joblib.load(scalerpath)
-        self.lowthr = config.risklow
-        self.highthr = config.riskhigh
-        self.breakerareacoef = config.breakerareacoef
-        self.minconscoef = config.minconscoef
-        self.wr1 = config.wr1
-        self.wr2 = config.wr2
-        self.wr3 = config.wr3
+    def __init__(self, model_path: str, scaler_path: str, config: AppConfig):
+        self.model = joblib.load(model_path)
+        self.scaler = joblib.load(scaler_path)
+        self.low_thr = config.risk_low
+        self.high_thr = config.risk_high
+        self.breaker_area_coef = config.breaker_area_coef
+        self.min_cons_coef = config.min_cons_coef
+        self.w_r1 = config.w_r1
+        self.w_r2 = config.w_r2
+        self.w_r3 = config.w_r3
 
     def compute(
         self,
@@ -235,18 +230,18 @@ class RiskModel:
         consumption: float,
         lon: float,
         lat: float,
-        aream2: float,
-        greenratio: float,
+        area_m2: float,
+        green_ratio: float,
     ):
         """
         breaker: سعة القاطع (أمبير)
         consumption: الاستهلاك (الوحدة حسب بياناتك - مثلاً ك.و.س)
         lon, lat: إحداثيات العداد
-        aream2: المساحة المكتشفة (م²)
-        greenratio: نسبة الخضرة داخل الصندوق [0..1]
+        area_m2: المساحة المكتشفة (م²)
+        green_ratio: نسبة الخضرة داخل الصندوق [0..1]
         """
         # 1. المساحة الخضراء الفعلية
-        effectivearea = aream2  greenratio
+        effective_area = area_m2 * green_ratio
 
         # 2. تحضير البيانات لنموذج العزلة
         X = np.array([[breaker, consumption, lon, lat]], dtype=float)
@@ -256,91 +251,94 @@ class RiskModel:
 
         # 3. معايير المخاطر
         # (r1) هل سعة القاطع أقل من المطلوب لمساحة خضراء معينة؟
-        r1 = 1.0 if breaker < (effectivearea  self.breakerareacoef) else 0.0
+        r1 = 1.0 if breaker < (effective_area * self.breaker_area_coef) else 0.0
 
         # (r2) هل الاستهلاك أقل من الحد الأدنى المتوقع لهذه المساحة؟
-        r2 = 1.0 if consumption < (effectivearea  self.minconscoef) else 0.0
+        r2 = 1.0 if consumption < (effective_area * self.min_cons_coef) else 0.0
 
         # (r3) ناتج نموذج العزلة (هنا نفترض أن 1 تعني حالة شاذة / خطر أعلى)
         r3 = 1.0 if anomaly == 1 else 0.0
 
         # 4. حساب النتيجة النهائية
-        score = self.wr1  r1 + self.wr2  r2 + self.wr3  r3
+        score = self.w_r1 * r1 + self.w_r2 * r2 + self.w_r3 * r3
 
         # 5. تصنيف الأولوية
-        if score >= self.highthr:
+        if score >= self.high_thr:
             pr = "قصوى"
-        elif score >= self.lowthr:
+        elif score >= self.low_thr:
             pr = "متوسطة"
         else:
             pr = "منخفضة"
 
         return score, pr
 
-======================= دالة تقدير الخضرة =======================
-def estimategreenratio(
-    rgbarr: np.ndarray,
-    hsvarr: Tuple[np.ndarray, np.ndarray, np.ndarray],
-    boxxyxy: Tuple[float, float, float, float],
+
+# ======================= دالة تقدير الخضرة =======================
+def estimate_green_ratio(
+    rgb_arr: np.ndarray,
+    hsv_arr: Tuple[np.ndarray, np.ndarray, np.ndarray],
+    box_xyxy: Tuple[float, float, float, float],
 ) -> float:
     """
     تقدير نسبة الخضرة داخل الصندوق المحدد من صورة كاملة تم حساب RGB/HSV لها مسبقاً.
-    - rgbarr: مصفوفة RGB للصورة الأصلية (H, W, 3)
-    - hsvarr: (Harr, Sarr, Varr) للصورة كاملة أيضاً
-    - boxxyxy: إحداثيات الصندوق داخل الصورة
+    - rgb_arr: مصفوفة RGB للصورة الأصلية (H, W, 3)
+    - hsv_arr: (H_arr, S_arr, V_arr) للصورة كاملة أيضاً
+    - box_xyxy: إحداثيات الصندوق داخل الصورة
     """
-    x1, y1, x2, y2 = [int(v) for v in boxxyxy]
+    x1, y1, x2, y2 = [int(v) for v in box_xyxy]
     if x2 <= x1 or y2 <= y1:
         return 0.0
 
     # تقطيع من الـ numpy مباشرة لتوفير الوقت (بدل crop لكل صندوق)
-    croprgb = rgbarr[y1:y2, x1:x2, :]
-    if croprgb.size == 0:
+    crop_rgb = rgb_arr[y1:y2, x1:x2, :]
+    if crop_rgb.size == 0:
         return 0.0
 
-    R = croprgb[..., 0].astype(np.float32)
-    G = croprgb[..., 1].astype(np.float32)
-    B = croprgb[..., 2].astype(np.float32)
+    R = crop_rgb[..., 0].astype(np.float32)
+    G = crop_rgb[..., 1].astype(np.float32)
+    B = crop_rgb[..., 2].astype(np.float32)
 
     # 1) هيمنة الأخضر
-    dominancemask = (
-        (G > R  cfg.greendominance)
-        & (G > B  cfg.greendominance)
-        & (G > cfg.greenminvalue)
+    dominance_mask = (
+        (G > R * cfg.green_dominance)
+        & (G > B * cfg.green_dominance)
+        & (G > cfg.green_min_value)
     )
 
     # 2) ExG
     Rn = R / 255.0
     Gn = G / 255.0
     Bn = B / 255.0
-    exg = 2.0  Gn - Rn - Bn
-    exgmask = exg > 0.08
+    exg = 2.0 * Gn - Rn - Bn
+    exg_mask = exg > 0.08
 
     # 3) HSV
-    Hfull, Sfull, Vfull = hsvarr
-    H = Hfull[y1:y2, x1:x2]
-    S = Sfull[y1:y2, x1:x2]
-    V = Vfull[y1:y2, x1:x2]
-    hsvmask = (H >= 25) & (H <= 67) & (S >= 60) & (V >= 50)
+    H_full, S_full, V_full = hsv_arr
+    H = H_full[y1:y2, x1:x2]
+    S = S_full[y1:y2, x1:x2]
+    V = V_full[y1:y2, x1:x2]
+    hsv_mask = (H >= 25) & (H <= 67) & (S >= 60) & (V >= 50)
 
-    greenmask = dominancemask | exgmask | hsvmask
-    return float(greenmask.mean())
+    green_mask = dominance_mask | exg_mask | hsv_mask
+    return float(green_mask.mean())
 
-======================= الكشف =======================
+
+# ======================= الكشف =======================
 @dataclass
 class FieldDetection:
-    bboxxyxy: Tuple[float, float, float, float]
+    bbox_xyxy: Tuple[float, float, float, float]
     conf: float
-    aream2: int
-    centerlatlon: Tuple[float, float]
-    edgedistancem: float
-    centerdistancem: float
-    outimgpath: str
-    greenratio: float
+    area_m2: int
+    center_latlon: Tuple[float, float]
+    edge_distance_m: float
+    center_distance_m: float
+    out_img_path: str
+    green_ratio: float
 
-def detectboxes(image: Image.Image, model: YOLO, minconf: float = 0.5):
+
+def detect_boxes(image: Image.Image, model: YOLO, min_conf: float = 0.5):
     """تشغيل YOLO على صورة واحدة وإرجاع الصناديق المرتبة من الأعلى ثقةً."""
-    res = model.predict(source=image, imgsz=640, conf=minconf, verbose=False)[0]
+    res = model.predict(source=image, imgsz=640, conf=min_conf, verbose=False)[0]
     if not res or not res.boxes or len(res.boxes) == 0:
         return []
     boxes = res.boxes.xyxy.cpu().numpy()
@@ -348,83 +346,84 @@ def detectboxes(image: Image.Image, model: YOLO, minconf: float = 0.5):
     idxs = np.argsort(-confs)
     return [(boxes[i], float(confs[i])) for i in idxs]
 
-def detectfieldprogressive(
-    imgpath: str,
+
+def detect_field_progressive(
+    img_path: str,
     lat: float,
     lon: float,
-    meterid: str,
-    modelyolo: YOLO,
-    calibrationfactor: float,
-    minconfaccept: float,
-    minaream2: float,
-    detecteddir: str,
-    rstart: int = 50,
-    rstep: int = 10,
-    rmax: int = 200,
+    meter_id: str,
+    model_yolo: YOLO,
+    calibration_factor: float,
+    min_conf_accept: float,
+    min_area_m2: float,
+    detected_dir: str,
+    r_start: int = 50,
+    r_step: int = 10,
+    r_max: int = 200,
 ) -> Optional[FieldDetection]:
     """
     ✅ Progressive search by EDGE distance:
     - البحث عن الحقل الأقرب باستخدام مسافة الحافة EDGE.
     - R = 50, 60, 70, ..., 200
-    - أول R يوجد فيه صندوق بـ edgedistance <= R يتم اختياره (الأقرب بالحافة ثم بالمركز).
+    - أول R يوجد فيه صندوق بـ edge_distance <= R يتم اختياره (الأقرب بالحافة ثم بالمركز).
     """
-    image = Image.open(imgpath).convert("RGB")
-    boxes = detectboxes(image, modelyolo, minconf=minconfaccept)
+    image = Image.open(img_path).convert("RGB")
+    boxes = detect_boxes(image, model_yolo, min_conf=min_conf_accept)
     if not boxes:
         return None
 
-    mperpx = cfg.scenesizem / float(cfg.mapsize[0])
+    m_per_px = cfg.scene_size_m / float(cfg.map_size[0])
     cx, cy = image.width / 2, image.height / 2
 
     # تجهيز مصفوفات RGB/HSV مرة واحدة للصورة كاملة
-    rgbarr = np.asarray(image, dtype=np.uint8)
-    hsvimg = image.convert("HSV")
-    Hfull = np.asarray(hsvimg.getchannel(0), dtype=np.uint8)
-    Sfull = np.asarray(hsvimg.getchannel(1), dtype=np.uint8)
-    Vfull = np.asarray(hsvimg.getchannel(2), dtype=np.uint8)
-    hsvarr = (Hfull, Sfull, Vfull)
+    rgb_arr = np.asarray(image, dtype=np.uint8)
+    hsv_img = image.convert("HSV")
+    H_full = np.asarray(hsv_img.getchannel(0), dtype=np.uint8)
+    S_full = np.asarray(hsv_img.getchannel(1), dtype=np.uint8)
+    V_full = np.asarray(hsv_img.getchannel(2), dtype=np.uint8)
+    hsv_arr = (H_full, S_full, V_full)
 
     candidates = []
     for box, conf in boxes:
-        wpx = abs(box[2] - box[0])
-        hpx = abs(box[3] - box[1])
-        area = wpx  hpx  (mperpx*2)
-        corrected = area  calibrationfactor
-        if corrected < minaream2:
+        w_px = abs(box[2] - box[0])
+        h_px = abs(box[3] - box[1])
+        area = w_px * h_px * (m_per_px**2)
+        corrected = area * calibration_factor
+        if corrected < min_area_m2:
             continue
 
         # حساب إحداثيات مركز الصندوق بالنسبة للصورة
         bx = (box[0] + box[2]) / 2
         by = (box[1] + box[3]) / 2
-        dxm = (bx - cx)  mperpx
-        dym = (by - cy)  mperpx
+        dx_m = (bx - cx) * m_per_px
+        dy_m = (by - cy) * m_per_px
 
         # تحويل فرق الإحداثيات إلى lat/lon
-        dlat = -(dym / 111320.0)
-        dlon = dxm / (40075000.0  math.cos(math.radians(lat)) / 360.0)
+        dlat = -(dy_m / 111320.0)
+        dlon = dx_m / (40075000.0 * math.cos(math.radians(lat)) / 360.0)
         flat = lat + dlat
         flon = lon + dlon
 
-        centerdist = geodesic((lat, lon), (flat, flon)).meters
+        center_dist = geodesic((lat, lon), (flat, flon)).meters
 
         # تقدير نسبة الخضرة
-        greenratio = estimategreenratio(rgbarr, hsvarr, tuple(box.tolist()))
-        if greenratio < cfg.greenratiomin:
+        green_ratio = estimate_green_ratio(rgb_arr, hsv_arr, tuple(box.tolist()))
+        if green_ratio < cfg.green_ratio_min:
             continue
 
-        radiuspx = max(wpx, hpx) / 2
-        radiusm = radiuspx  mperpx
-        edgedist = max(centerdist - radiusm, 0.0)
+        radius_px = max(w_px, h_px) / 2
+        radius_m = radius_px * m_per_px
+        edge_dist = max(center_dist - radius_m, 0.0)
 
         candidates.append(
             (
-                edgedist,
-                centerdist,
+                edge_dist,
+                center_dist,
                 box,
                 conf,
                 int(corrected),
                 (flat, flon),
-                greenratio,
+                green_ratio,
             )
         )
 
@@ -432,18 +431,18 @@ def detectfieldprogressive(
         return None
 
     chosen = None
-    chosenR = None
-    for R in range(rstart, rmax + 1, rstep):
-        within = [c for c in candidates if c[0] <= R]  # c[0] = edgedist
+    chosen_R = None
+    for R in range(r_start, r_max + 1, r_step):
+        within = [c for c in candidates if c[0] <= R]  # c[0] = edge_dist
         if within:
             chosen = min(within, key=lambda x: (x[0], x[1]))  # (edge, center)
-            chosenR = R
+            chosen_R = R
             break
 
     if chosen is None:
         return None
 
-    edgedist, centerdist, box, conf, aream2, (flat, flon), greenratio = chosen
+    edge_dist, center_dist, box, conf, area_m2, (flat, flon), green_ratio = chosen
 
     # رسم الصندوق وخط من مركز الصورة إلى مركز الصندوق
     draw = ImageDraw.Draw(image)
@@ -455,80 +454,84 @@ def detectfieldprogressive(
     )
     draw.text(
         (int(box[0]) + 4, int(box[1]) + 4),
-        f"R<= {chosenR}m | Edge:{edgedist:.1f}m | Center:{centerdist:.1f}m | Green {greenratio100:.0f}%",
+        f"R<= {chosen_R}m | Edge:{edge_dist:.1f}m | Center:{center_dist:.1f}m | Green {green_ratio*100:.0f}%",
         fill="white",
     )
 
-    os.makedirs(detecteddir, existok=True)
-    outpath = os.path.join(detecteddir, f"{meterid}.png")
-    image.save(outpath)
+    os.makedirs(detected_dir, exist_ok=True)
+    out_path = os.path.join(detected_dir, f"{meter_id}.png")
+    image.save(out_path)
 
     return FieldDetection(
-        bboxxyxy=tuple(box.tolist()),
+        bbox_xyxy=tuple(box.tolist()),
         conf=float(conf),
-        aream2=int(aream2),
-        centerlatlon=(flat, flon),
-        edgedistancem=float(edgedist),
-        centerdistancem=float(centerdist),
-        outimgpath=outpath,
-        greenratio=float(greenratio),
+        area_m2=int(area_m2),
+        center_latlon=(flat, flon),
+        edge_distance_m=float(edge_dist),
+        center_distance_m=float(center_dist),
+        out_img_path=out_path,
+        green_ratio=float(green_ratio),
     )
 
-======================= CDSE Token & Download =======================
-TOKENURL = (
+
+# ======================= CDSE Token & Download =======================
+TOKEN_URL = (
     "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/"
     "protocol/openid-connect/token"
 )
 
-def getcdsetoken() -> str:
-    """الحصول على توكن CDSE مع استخدام sessionstate كـ cache."""
-    tok = st.sessionstate.get("cdsetoken")
-    exp = st.sessionstate.get("cdsetokenexp", 0)
+
+def get_cdse_token() -> str:
+    """الحصول على توكن CDSE مع استخدام session_state كـ cache."""
+    tok = st.session_state.get("_cdse_token")
+    exp = st.session_state.get("_cdse_token_exp", 0)
     if tok and time.time() < exp - 60:
         return tok
 
-    cid = st.secrets.get("CDSECLIENTID")
-    csec = st.secrets.get("CDSECLIENTSECRET")
+    cid = st.secrets.get("CDSE_CLIENT_ID")
+    csec = st.secrets.get("CDSE_CLIENT_SECRET")
     if not cid or not csec:
         raise RuntimeError(
-            "CDSECLIENTID / CDSECLIENTSECRET غير موجودة في secrets.toml"
+            "CDSE_CLIENT_ID / CDSE_CLIENT_SECRET غير موجودة في secrets.toml"
         )
 
     data = {
-        "granttype": "clientcredentials",
-        "clientid": cid,
-        "clientsecret": csec,
+        "grant_type": "client_credentials",
+        "client_id": cid,
+        "client_secret": csec,
     }
-    r = requests.post(TOKENURL, data=data, timeout=20)
-    if r.statuscode != 200:
-        raise RuntimeError(f"CDSE token error {r.statuscode}: {r.text[:200]}")
+    r = requests.post(TOKEN_URL, data=data, timeout=20)
+    if r.status_code != 200:
+        raise RuntimeError(f"CDSE token error {r.status_code}: {r.text[:200]}")
     js = r.json()
-    access = js["accesstoken"]
-    expires = int(js.get("expiresin", 3600))
+    access = js["access_token"]
+    expires = int(js.get("expires_in", 3600))
 
-    st.sessionstate["cdsetoken"] = access
-    st.sessionstate["cdsetokenexp"] = time.time() + expires
+    st.session_state["_cdse_token"] = access
+    st.session_state["_cdse_token_exp"] = time.time() + expires
     return access
 
-def bboxfrommeters(lat: float, lon: float, sizem: float):
+
+def bbox_from_meters(lat: float, lon: float, size_m: float):
     """حساب صندوق (BBox) بالإحداثيات الجغرافية لمساحة مربعة حول نقطة معينة."""
-    half = sizem / 2.0
+    half = size_m / 2.0
     dlat = half / 111320.0
-    dlon = half / (111320.0  math.cos(math.radians(lat)))
+    dlon = half / (111320.0 * math.cos(math.radians(lat)))
     return [lon - dlon, lat - dlat, lon + dlon, lat + dlat]
 
-@st.cachedata(showspinner=False, ttl=24  3600)
-def downloadimage(lat: float, lon: float, meterid: str, timeout: int = 30):
+
+@st.cache_data(show_spinner=False, ttl=24 * 3600)
+def download_image(lat: float, lon: float, meter_id: str, timeout: int = 30):
     """
     تحميل صورة Sentinel-2 من Copernicus لموقع عداد معين.
-    تستخدم Cache على مستوى الملف (images/meterid.png).
+    تستخدم Cache على مستوى الملف (images/meter_id.png).
     """
-    imgpath = os.path.join(cfg.imagesdir, f"{meterid}.png")
-    if os.path.exists(imgpath):
-        return imgpath
+    img_path = os.path.join(cfg.images_dir, f"{meter_id}.png")
+    if os.path.exists(img_path):
+        return img_path
 
-    def request(token: str):
-        bbox = bboxfrommeters(lat, lon, cfg.scenesizem)
+    def _request(token: str):
+        bbox = bbox_from_meters(lat, lon, cfg.scene_size_m)
         url = "https://sh.dataspace.copernicus.eu/api/v1/process"
         payload = {
             "input": {
@@ -553,8 +556,8 @@ def downloadimage(lat: float, lon: float, meterid: str, timeout: int = 30):
                 ],
             },
             "output": {
-                "width": cfg.mapsize[0],
-                "height": cfg.mapsize[1],
+                "width": cfg.map_size[0],
+                "height": cfg.map_size[1],
                 "responses": [
                     {"identifier": "default", "format": {"type": "image/png"}}
                 ],
@@ -562,101 +565,102 @@ def downloadimage(lat: float, lon: float, meterid: str, timeout: int = 30):
             "evalscript": """//VERSION=3
 function setup(){return {input:["B04","B03","B02"],output:{bands:3}}}
 function evaluatePixel(s){
-  return [s.B041.8, s.B031.8, s.B021.8]
+  return [s.B04*1.8, s.B03*1.8, s.B02*1.8]
 }
 """,
         }
         headers = {"Authorization": f"Bearer {token}"}
         return requests.post(url, headers=headers, json=payload, timeout=timeout)
 
-    token = getcdsetoken()
-    r = request(token)
-    if r.statuscode == 401:
+    token = get_cdse_token()
+    r = _request(token)
+    if r.status_code == 401:
         # إعادة المحاولة بتوكن جديد
-        token = getcdsetoken()
-        r = request(token)
+        token = get_cdse_token()
+        r = _request(token)
 
-    if r.statuscode == 200:
-        with open(imgpath, "wb") as f:
+    if r.status_code == 200:
+        with open(img_path, "wb") as f:
             f.write(r.content)
-        return imgpath
+        return img_path
     else:
         logger.warning(
             "Copernicus status %s for meter %s: %s",
-            r.statuscode,
-            meterid,
+            r.status_code,
+            meter_id,
             r.text[:200],
         )
         st.warning(
-            f"Copernicus status {r.statuscode} للعداد {meterid}: {r.text[:200]}"
+            f"Copernicus status {r.status_code} للعداد {meter_id}: {r.text[:200]}"
         )
         return None
 
-======================= واجهة Streamlit =======================
-st.setpageconfig(
-    pagetitle=cfg.pagetitle, pageicon=cfg.pageicon, layout="wide"
+
+# ======================= واجهة Streamlit =======================
+st.set_page_config(
+    page_title=cfg.page_title, page_icon=cfg.page_icon, layout="wide"
 )
-ensuredirs(cfg.imagesdir, cfg.detecteddir, cfg.outputdir, cfg.modelsdir)
+ensure_dirs(cfg.images_dir, cfg.detected_dir, cfg.output_dir, cfg.models_dir)
 
-MODELPATH = os.path.join(cfg.modelsdir, "best.pt")
-MLMODELPATH = os.path.join(cfg.modelsdir, "isolationmodel.joblib")
-SCALERPATH = os.path.join(cfg.modelsdir, "isolationscaler.joblib")
+MODEL_PATH = os.path.join(cfg.models_dir, "best.pt")
+ML_MODEL_PATH = os.path.join(cfg.models_dir, "isolation_model.joblib")
+SCALER_PATH = os.path.join(cfg.models_dir, "isolation_scaler.joblib")
 
-st.title(cfg.pagetitle)
+st.title(cfg.page_title)
 
-uploaded = st.fileuploader("📁 رفع ملف البيانات (Excel)", type=["xlsx"])
+uploaded = st.file_uploader("📁 رفع ملف البيانات (Excel)", type=["xlsx"])
 colors = {"قصوى": "#ff4d4d", "متوسطة": "#ffa500", "منخفضة": "#4CAF50"}
 
 if uploaded:
-    df = readexcel(uploaded)
+    df = read_excel(uploaded)
     st.sidebar.info(f"🔢 عدد الحالات في الملف: {len(df)}")
 
     # ====== إعدادات إضافية من واجهة المستخدم ======
     st.sidebar.markdown("### ⚙️ إعدادات التحليل")
 
     # فلترة حسب القاطع
-    breakerfilter = st.sidebar.selectbox(
+    breaker_filter = st.sidebar.selectbox(
         "سعة القاطع", ["الكل"] + sorted(df["Breaker"].unique().tolist())
     )
 
     # ترتيب حسب الاستهلاك
-    sortorder = st.sidebar.radio(
+    sort_order = st.sidebar.radio(
         "ترتيب حسب الاستهلاك", ["بدون ترتيب", "تصاعدي", "تنازلي"]
     )
 
     # إمكانية تعديل أدنى مساحة وأدنى ثقة من الواجهة
-    cfg.minaream2 = st.sidebar.numberinput(
+    cfg.min_area_m2 = st.sidebar.number_input(
         "الحد الأدنى للمساحة (م²)",
-        minvalue=1000.0,
-        maxvalue=50000.0,
-        value=cfg.minaream2,
+        min_value=1000.0,
+        max_value=50000.0,
+        value=cfg.min_area_m2,
         step=500.0,
     )
-    cfg.minconfidenceaccept = st.sidebar.slider(
+    cfg.min_confidence_accept = st.sidebar.slider(
         "أدنى ثقة لنموذج YOLO",
-        minvalue=0.1,
-        maxvalue=0.9,
-        value=cfg.minconfidenceaccept,
+        min_value=0.1,
+        max_value=0.9,
+        value=cfg.min_confidence_accept,
         step=0.05,
     )
-    cfg.greenratiomin = st.sidebar.slider(
+    cfg.green_ratio_min = st.sidebar.slider(
         "الحد الأدنى لنسبة الخضرة داخل الحقل (%)",
-        minvalue=0.0,
-        maxvalue=100.0,
-        value=cfg.greenratiomin * 100.0,
+        min_value=0.0,
+        max_value=100.0,
+        value=cfg.green_ratio_min * 100.0,
         step=5.0,
     ) / 100.0
 
     # فلترة حسب القاطع والاستهلاك
-    if breakerfilter != "الكل":
-        df = df[df["Breaker"] == breakerfilter]
+    if breaker_filter != "الكل":
+        df = df[df["Breaker"] == breaker_filter]
 
-    if sortorder == "تصاعدي":
-        df = df.sortvalues(by="consumption", ascending=True)
-    elif sortorder == "تنازلي":
-        df = df.sortvalues(by="consumption", ascending=False)
+    if sort_order == "تصاعدي":
+        df = df.sort_values(by="consumption", ascending=True)
+    elif sort_order == "تنازلي":
+        df = df.sort_values(by="consumption", ascending=False)
 
-    previewonly = st.sidebar.checkbox("🖼️ عرض الصور فقط (بدون تشغيل نموذج المخاطر)")
+    preview_only = st.sidebar.checkbox("🖼️ عرض الصور فقط (بدون تشغيل نموذج المخاطر)")
     if st.sidebar.button("📥 تنزيل/عرض الصور"):
         progress = st.sidebar.progress(0)
         cols = st.columns(4)
@@ -664,11 +668,11 @@ if uploaded:
         n = len(df)
         t0 = time.time()
 
-        for i, (, row) in enumerate(df.iterrows(), 1):
-            meter = cleanmeterid(row["Subscription"])
+        for i, (_, row) in enumerate(df.iterrows(), 1):
+            meter = clean_meter_id(row["Subscription"])
             lat = float(row["y"])
             lon = float(row["x"])
-            p = downloadimage(lat, lon, meter)
+            p = download_image(lat, lon, meter)
             if p:
                 with open(p, "rb") as f:
                     b64 = base64.b64encode(f.read()).decode()
@@ -678,7 +682,7 @@ if uploaded:
   <img src="data:image/png;base64,{b64}" width="230" style="border-radius:6px"><br>
   <small>عداد {meter}<br>Lat {lat:.6f}, Lon {lon:.6f}</small>
 </div>""",
-                    unsafeallowhtml=True,
+                    unsafe_allow_html=True,
                 )
                 shown += 1
             progress.progress(i / max(n, 1))
@@ -689,43 +693,43 @@ if uploaded:
         st.stop()
 
     if st.sidebar.button("🚀 بدء التحليل"):
-        modelyolo = loadyolo(MODELPATH)
-        riskmodel = RiskModel(MLMODELPATH, SCALERPATH, cfg)
+        model_yolo = load_yolo(MODEL_PATH)
+        risk_model = RiskModel(ML_MODEL_PATH, SCALER_PATH, cfg)
 
         progress = st.sidebar.progress(0)
         results = []
         cols = st.columns(3)
-        coli = 0
+        col_i = 0
         t0 = time.time()
         n = len(df)
 
-        for i, (, row) in enumerate(df.iterrows(), 1):
+        for i, (_, row) in enumerate(df.iterrows(), 1):
             try:
-                meter = cleanmeterid(row["Subscription"])
+                meter = clean_meter_id(row["Subscription"])
                 lat = float(row["y"])
                 lon = float(row["x"])
                 br = float(row["Breaker"])
                 cons = float(row["consumption"])
                 off = str(row["Office"])
 
-                imgpath = downloadimage(lat, lon, meter)
-                if not imgpath:
+                img_path = download_image(lat, lon, meter)
+                if not img_path:
                     progress.progress(i / max(n, 1))
                     continue
 
-                det = detectfieldprogressive(
-                    imgpath,
+                det = detect_field_progressive(
+                    img_path,
                     lat,
                     lon,
                     meter,
-                    modelyolo,
-                    cfg.calibrationfactor,
-                    cfg.minconfidenceaccept,
-                    cfg.minaream2,
-                    cfg.detecteddir,
-                    rstart=cfg.rstartm,
-                    rstep=cfg.rstepm,
-                    rmax=cfg.rmaxm,
+                    model_yolo,
+                    cfg.calibration_factor,
+                    cfg.min_confidence_accept,
+                    cfg.min_area_m2,
+                    cfg.detected_dir,
+                    r_start=cfg.r_start_m,
+                    r_step=cfg.r_step_m,
+                    r_max=cfg.r_max_m,
                 )
 
                 if det is None:
@@ -733,11 +737,11 @@ if uploaded:
                     continue
 
                 # إذا تم اختيار "عرض الصور فقط" لا نحسب المخاطر
-                if previewonly:
+                if preview_only:
                     score, pr = 0.0, "غير محسوب"
                 else:
-                    score, pr = riskmodel.compute(
-                        br, cons, lon, lat, det.aream2, det.greenratio
+                    score, pr = risk_model.compute(
+                        br, cons, lon, lat, det.area_m2, det.green_ratio
                     )
 
                 # حفظ النتيجة للـ Excel/HTML
@@ -746,9 +750,9 @@ if uploaded:
                         meter,
                         pr,
                         score,
-                        det.edgedistancem,
-                        det.centerdistancem,
-                        det.aream2,
+                        det.edge_distance_m,
+                        det.center_distance_m,
+                        det.area_m2,
                         cons,
                         br,
                         off,
@@ -757,8 +761,8 @@ if uploaded:
                     ]
                 )
 
-                bordercolor = colors.get(pr, "#ccc")
-                cardhtml = makeresultcardhtml(
+                border_color = colors.get(pr, "#ccc")
+                card_html = make_result_card_html(
                     meter,
                     pr,
                     score,
@@ -768,10 +772,10 @@ if uploaded:
                     off,
                     lat,
                     lon,
-                    bordercolor,
+                    border_color,
                 )
-                cols[coli % 3].markdown(cardhtml, unsafeallowhtml=True)
-                coli += 1
+                cols[col_i % 3].markdown(card_html, unsafe_allow_html=True)
+                col_i += 1
 
                 progress.progress(i / max(n, 1))
 
@@ -786,15 +790,15 @@ if uploaded:
                 continue
 
         if results:
-            resdf = pd.DataFrame(
+            res_df = pd.DataFrame(
                 results,
                 columns=[
                     "Subscription",
                     "priority",
-                    "riskscore",
-                    "edgedistancem",
-                    "centerdistancem",
-                    "aream2",
+                    "risk_score",
+                    "edge_distance_m",
+                    "center_distance_m",
+                    "area_m2",
                     "consumption",
                     "breaker",
                     "office",
@@ -804,16 +808,16 @@ if uploaded:
             )
 
             st.sidebar.markdown("### 📊 ملخص سريع")
-            st.sidebar.write(resdf["priority"].valuecounts())
+            st.sidebar.write(res_df["priority"].value_counts())
 
-            st.sidebar.downloadbutton(
+            st.sidebar.download_button(
                 "📥 نتائج Excel",
-                data=saveresultsexcel(resdf),
-                filename="results.xlsx",
+                data=save_results_excel(res_df),
+                file_name="results.xlsx",
             )
-            st.sidebar.downloadbutton(
+            st.sidebar.download_button(
                 "📥 تقرير HTML",
-                data=saveresultshtml(results, colors, cfg.detecteddir),
+                data=save_results_html(results, colors, cfg.detected_dir),
                 file_name="report.html",
                 mime="text/html",
             )
@@ -821,9 +825,4 @@ if uploaded:
         st.sidebar.success(f"⏱️ اكتمل التحليل في {round(time.time()-t0,1)} ثانية")
 
 st.markdown("---")
-st.markdown("👨‍💻 تطوير : مشهور العباس 2026 | 00966553339838 | ")
-``
-
-إذا ترغب:
-• أستطيع بعد ذلك تقسيم هذا الملف نفسه إلى هيكل مشروع كامل (عدة ملفات ومجلدات)، أو
-• تخصيص جزء معيّن لتحسين إضافي (مثلاً فقط منطق RiskModel أو فقط واجهة Streamlit).
+st.markdown("👨‍💻 **تطوير :** مشهور العباس 2026 | 00966553339838 | ")
