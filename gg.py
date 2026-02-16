@@ -44,10 +44,10 @@ class AppConfig:
     # أدنى مساحة (م²) لقبول الحقل
     min_area_m2: float = 5000.0
 
-    # ✅ Progressive search by EDGE distance
+    # ✅ Progressive search by EDGE distance (ستُضبط من واجهة المستخدم)
     r_start_m: int = 0
     r_step_m: int = 10
-    r_max_m: int = 50
+    r_max_m: int = 50   # الحد الأعلى الافتراضي
 
     # عتبات تصنيف المخاطر
     risk_low: float = 0.40
@@ -71,25 +71,23 @@ class AppConfig:
     green_dominance: float = 1.1
     green_min_value: int = 60
 
-    # ====== إعدادات نموذج المخاطر (بدلاً من أرقام ثابتة داخل الكود) ======
-    breaker_area_coef: float = 0.0013  # معامل علاقة سعة القاطع بالمساحة الخضراء
-    min_cons_coef: float = 0.20        # الحد الأدنى للاستهلاك بالنسبة للمساحة الخضراء
-    w_r1: float = 0.4                  # وزن معيار القاطع
-    w_r2: float = 0.4                  # وزن معيار الاستهلاك
-    w_r3: float = 0.2                  # وزن نموذج العزلة (Isolation Forest)
+    # ====== إعدادات نموذج المخاطر ======
+    breaker_area_coef: float = 0.0013
+    min_cons_coef: float = 0.20
+    w_r1: float = 0.4
+    w_r2: float = 0.4
+    w_r3: float = 0.2
 
 
 cfg = AppConfig()
 
 # ======================= أدوات عامة =======================
 def ensure_dirs(*paths: str) -> None:
-    """إنشاء المجلدات المطلوبة إن لم تكن موجودة."""
     for p in paths:
         os.makedirs(p, exist_ok=True)
 
 
 def clean_meter_id(val) -> str:
-    """إرجاع رقم العداد كنص نظيف بدون .0 أو صيغة علمية أو مسافات."""
     if pd.isna(val):
         return ""
     try:
@@ -101,7 +99,6 @@ def clean_meter_id(val) -> str:
     except Exception:
         s = str(val).strip()
         try:
-            # التعامل مع الصيغ العلمية مثل 1.23E+08
             if re.fullmatch(r"[0-9]+(\.[0-9]+)?[eE][\+\-]?\d+", s):
                 return str(int(float(s)))
         except Exception:
@@ -111,15 +108,12 @@ def clean_meter_id(val) -> str:
 
 
 def read_excel(file_obj) -> pd.DataFrame:
-    """قراءة ملف الإكسل وتحضير البيانات الأساسية."""
     df = pd.read_excel(file_obj, dtype={"Subscription": str})
     df["Subscription"] = df["Subscription"].apply(clean_meter_id)
-    # حذف الصفوف التي لا تحتوي على بيانات أساسية مطلوبة
     return df.dropna(subset=["Subscription", "Office", "Breaker", "consumption", "x", "y"])
 
 
 def save_results_excel(df: pd.DataFrame) -> bytes:
-    """تصدير النتائج إلى ملف Excel في الذاكرة."""
     buf = io.BytesIO()
     df.to_excel(buf, index=False)
     buf.seek(0)
@@ -127,18 +121,20 @@ def save_results_excel(df: pd.DataFrame) -> bytes:
 
 
 def save_results_html(rows: List[List], colors: dict, detected_dir: str) -> bytes:
-    """
-    توليد تقرير HTML بسيط يحتوي على صور الحقول وبياناتها.
-    rows: [meter, pr, score, edge_d, center_d, area, cons, br, off, lat, lon]
-    """
     from html import escape
 
     html = [
         "<html><head><meta charset='UTF-8'><style>"
-        "body{font-family:Arial, sans-serif;}"
-        ".card{border-radius:10px;margin:6px;text-align:center;padding:10px;}"
+        "body{font-family:Tahoma, Arial, sans-serif;background-color:#f5f7fa;direction:rtl;text-align:right;}"
+        ".wrap{display:flex;flex-wrap:wrap;justify-content:flex-start;}"
+        ".card{border-radius:10px;margin:8px;padding:10px;width:320px;"
+        "background-color:#ffffff;border:1px solid #e0e4ea;box-shadow:0 2px 4px rgba(0,0,0,0.08);}"
         ".img{border-radius:8px;}"
-        "</style></head><body><div style='display:flex;flex-wrap:wrap;'>"
+        ".title{font-weight:bold;color:#1f3b57;margin-bottom:4px;}"
+        ".meta{font-size:13px;color:#444;line-height:1.6;}"
+        "a{color:#0066cc;text-decoration:none;font-size:13px;}"
+        "a:hover{text-decoration:underline;}"
+        "</style></head><body><div class='wrap'>"
     ]
     for r in rows:
         meter_id, priority, risk, edge_d, center_d, area, consumption, breaker, office, lat, lon = r
@@ -150,18 +146,21 @@ def save_results_html(rows: List[List], colors: dict, detected_dir: str) -> byte
                 img_b64 = base64.b64encode(f.read()).decode()
             img_tag = (
                 f"<img src='data:image/png;base64,{img_b64}' "
-                f"width='250' class='img'>"
+                f"width='280' class='img'>"
             )
 
         html.append(f"""
-<div class='card' style='border:4px solid {border};'>
-  {img_tag}<br>
-  <strong>عداد {escape(str(meter_id))} ({escape(str(priority))})</strong><br>
-  خطر: {risk*100:.1f}% | حافة: {edge_d:.1f}م | مركز: {center_d:.1f}م | مساحة: {area}م²<br>
-  الاستهلاك: {consumption} | القاطع: {breaker} | المكتب: {escape(str(office))}<br>
-  <a href='https://maps.google.com?q={lat},{lon}'>📍 الموقع</a>
-  &nbsp;|&nbsp;
-  <a href='https://wa.me/?text=عداد:{meter_id}%20الموقع:{lat},{lon}'>📲 واتساب</a>
+<div class='card' style='border-top:4px solid {border};'>
+  <div style='text-align:center;margin-bottom:6px;'>{img_tag}</div>
+  <div class='title'>عداد {escape(str(meter_id))} – أولوية: {escape(str(priority))}</div>
+  <div class='meta'>
+    نسبة الخطر: {risk*100:.1f}%<br>
+    مسافة الحافة: {edge_d:.1f}م – مسافة المركز: {center_d:.1f}م – مساحة: {area}م²<br>
+    الاستهلاك: {consumption} – القاطع: {breaker} – المكتب: {escape(str(office))}<br>
+    <a href='https://maps.google.com?q={lat},{lon}'>📍 عرض الموقع على الخريطة</a>
+    &nbsp;|&nbsp;
+    <a href='https://wa.me/?text=عداد:{meter_id}%20الموقع:{lat},{lon}'>📲 مشاركة عبر واتساب</a>
+  </div>
 </div>""")
     html.append("</div></body></html>")
     return "\n".join(html).encode("utf-8")
@@ -179,18 +178,35 @@ def make_result_card_html(
     lon: float,
     border_color: str,
 ) -> str:
-    """توليد HTML لعرض بطاقة نتيجة واحدة في Streamlit."""
     with open(det.out_img_path, "rb") as f:
         img64 = base64.b64encode(f.read()).decode()
 
     card_html = f"""
-<div style="border:4px solid {border_color};padding:10px;border-radius:12px;margin:6px;text-align:center;">
-  <img src="data:image/png;base64,{img64}" width="260" style="border-radius:8px;"><br>
-  <strong>عداد {meter} ({pr})</strong><br>
-  خطر:{score*100:.1f}% | حافة:{det.edge_distance_m:.1f}م | مركز:{det.center_distance_m:.1f}م<br>
-  مساحة:{det.area_m2}م² | خضرة:{det.green_ratio*100:.0f}%<br>
-  استهلاك:{cons} | قاطع:{br} | مكتب:{off}<br>
-  <a href="https://maps.google.com?q={lat},{lon}">📍 الموقع</a>
+<div style="
+  border-radius:12px;
+  margin:8px;
+  padding:10px;
+  background-color:#ffffff;
+  border:1px solid #d8dde6;
+  border-top:4px solid {border_color};
+  box-shadow:0 2px 4px rgba(0,0,0,0.06);
+  text-align:right;
+  direction:rtl;
+  font-family:Tahoma, Arial, sans-serif;
+">
+  <div style="text-align:center;margin-bottom:6px;">
+    <img src="data:image/png;base64,{img64}" width="260" style="border-radius:8px;">
+  </div>
+  <div style="font-weight:bold;color:#1f3b57;margin-bottom:4px;">
+    عداد {meter} – أولوية: {pr}
+  </div>
+  <div style="font-size:13px;color:#333;line-height:1.7;">
+    نسبة الخطر: {score*100:.1f}%<br>
+    مسافة الحافة: {det.edge_distance_m:.1f} م – مسافة المركز: {det.center_distance_m:.1f} م<br>
+    مساحة الحقل: {det.area_m2} م² – نسبة الخضرة: {det.green_ratio*100:.0f}%<br>
+    الاستهلاك: {cons} – القاطع: {br} – المكتب: {off}<br>
+    <a href="https://maps.google.com?q={lat},{lon}" style="color:#0066cc;text-decoration:none;">📍 عرض الموقع</a>
+  </div>
 </div>
 """
     return card_html
@@ -199,20 +215,11 @@ def make_result_card_html(
 # ======================= تحميل النماذج =======================
 @st.cache_resource
 def load_yolo(model_path: str):
-    """تحميل نموذج YOLO مرة واحدة لكل جلسة."""
     logger.info(f"Loading YOLO model from {model_path}")
     return YOLO(model_path)
 
 
 class RiskModel:
-    """
-    نموذج حساب مستوى المخاطر:
-    - يستخدم Isolation Forest + قواعد منطقية تعتمد على:
-      * سعة القاطع
-      * الاستهلاك
-      * المساحة الخضراء الفعلية
-    """
-
     def __init__(self, model_path: str, scaler_path: str, config: AppConfig):
         self.model = joblib.load(model_path)
         self.scaler = joblib.load(scaler_path)
@@ -234,35 +241,51 @@ class RiskModel:
         green_ratio: float,
     ):
         """
-        breaker: سعة القاطع (أمبير)
-        consumption: الاستهلاك (الوحدة حسب بياناتك - مثلاً ك.و.س)
-        lon, lat: إحداثيات العداد
-        area_m2: المساحة المكتشفة (م²)
-        green_ratio: نسبة الخضرة داخل الصندوق [0..1]
+        حساب درجة الخطر بشكل متدرج لتمييز الحالات داخل نفس الفئة.
         """
-        # 1. المساحة الخضراء الفعلية
+        # 1) المساحة الخضراء الفعلية
         effective_area = area_m2 * green_ratio
 
-        # 2. تحضير البيانات لنموذج العزلة
+        # في حالة لا توجد خضرة تقريباً
+        if effective_area <= 0:
+            return 0.0, "منخفضة"
+
+        # 2) تحضير البيانات لنموذج العزلة
         X = np.array([[breaker, consumption, lon, lat]], dtype=float)
         Xs = self.scaler.transform(X)
         anomaly = self.model.predict(Xs)[0]
-        # ملاحظة: تأكد من أن 1 تعني حالة شاذة في نموذجك أو عدّل الشرط حسب تدريبك
 
-        # 3. معايير المخاطر
-        # (r1) هل سعة القاطع أقل من المطلوب لمساحة خضراء معينة؟
-        r1 = 1.0 if breaker < (effective_area * self.breaker_area_coef) else 0.0
+        # 3) معيار القاطع (r1) - تدريجي
+        needed_breaker = effective_area * self.breaker_area_coef
+        if needed_breaker <= 0:
+            r1 = 0.0
+        elif breaker >= needed_breaker:
+            r1 = 0.0
+        else:
+            deficit_ratio = (needed_breaker - breaker) / needed_breaker
+            deficit_ratio = max(0.0, min(deficit_ratio, 1.0))
+            r1 = deficit_ratio
 
-        # (r2) هل الاستهلاك أقل من الحد الأدنى المتوقع لهذه المساحة؟
-        r2 = 1.0 if consumption < (effective_area * self.min_cons_coef) else 0.0
+        # 4) معيار الاستهلاك (r2) - تدريجي
+        needed_min_cons = effective_area * self.min_cons_coef
+        if needed_min_cons <= 0:
+            r2 = 0.0
+        elif consumption >= needed_min_cons:
+            r2 = 0.0
+        else:
+            deficit_ratio = (needed_min_cons - consumption) / needed_min_cons
+            deficit_ratio = max(0.0, min(deficit_ratio, 1.0))
+            r2 = deficit_ratio
 
-        # (r3) ناتج نموذج العزلة (هنا نفترض أن 1 تعني حالة شاذة / خطر أعلى)
+        # 5) معيار العزلة (r3)
+        # إذا كان نموذجك يرجع 1 = شاذ، -1 = عادي => عدّل الشرط
+        # هنا نفترض 1 = شاذ (حسب تعديلك السابق)
         r3 = 1.0 if anomaly == 1 else 0.0
 
-        # 4. حساب النتيجة النهائية
+        # 6) حساب النتيجة النهائية
         score = self.w_r1 * r1 + self.w_r2 * r2 + self.w_r3 * r3
 
-        # 5. تصنيف الأولوية
+        # 7) تصنيف الأولوية
         if score >= self.high_thr:
             pr = "قصوى"
         elif score >= self.low_thr:
@@ -279,17 +302,10 @@ def estimate_green_ratio(
     hsv_arr: Tuple[np.ndarray, np.ndarray, np.ndarray],
     box_xyxy: Tuple[float, float, float, float],
 ) -> float:
-    """
-    تقدير نسبة الخضرة داخل الصندوق المحدد من صورة كاملة تم حساب RGB/HSV لها مسبقاً.
-    - rgb_arr: مصفوفة RGB للصورة الأصلية (H, W, 3)
-    - hsv_arr: (H_arr, S_arr, V_arr) للصورة كاملة أيضاً
-    - box_xyxy: إحداثيات الصندوق داخل الصورة
-    """
     x1, y1, x2, y2 = [int(v) for v in box_xyxy]
     if x2 <= x1 or y2 <= y1:
         return 0.0
 
-    # تقطيع من الـ numpy مباشرة لتوفير الوقت (بدل crop لكل صندوق)
     crop_rgb = rgb_arr[y1:y2, x1:x2, :]
     if crop_rgb.size == 0:
         return 0.0
@@ -298,21 +314,18 @@ def estimate_green_ratio(
     G = crop_rgb[..., 1].astype(np.float32)
     B = crop_rgb[..., 2].astype(np.float32)
 
-    # 1) هيمنة الأخضر
     dominance_mask = (
         (G > R * cfg.green_dominance)
         & (G > B * cfg.green_dominance)
         & (G > cfg.green_min_value)
     )
 
-    # 2) ExG
     Rn = R / 255.0
     Gn = G / 255.0
     Bn = B / 255.0
     exg = 2.0 * Gn - Rn - Bn
     exg_mask = exg > 0.08
 
-    # 3) HSV
     H_full, S_full, V_full = hsv_arr
     H = H_full[y1:y2, x1:x2]
     S = S_full[y1:y2, x1:x2]
@@ -337,7 +350,6 @@ class FieldDetection:
 
 
 def detect_boxes(image: Image.Image, model: YOLO, min_conf: float = 0.5):
-    """تشغيل YOLO على صورة واحدة وإرجاع الصناديق المرتبة من الأعلى ثقةً."""
     res = model.predict(source=image, imgsz=640, conf=min_conf, verbose=False)[0]
     if not res or not res.boxes or len(res.boxes) == 0:
         return []
@@ -357,14 +369,14 @@ def detect_field_progressive(
     min_conf_accept: float,
     min_area_m2: float,
     detected_dir: str,
-    r_start: int = 50,
-    r_step: int = 10,
-    r_max: int = 200,
+    r_start: int,
+    r_step: int,
+    r_max: int,
 ) -> Optional[FieldDetection]:
     """
     ✅ Progressive search by EDGE distance:
     - البحث عن الحقل الأقرب باستخدام مسافة الحافة EDGE.
-    - R = 50, 60, 70, ..., 200
+    - R = r_start, r_start + r_step, ..., r_max
     - أول R يوجد فيه صندوق بـ edge_distance <= R يتم اختياره (الأقرب بالحافة ثم بالمركز).
     """
     image = Image.open(img_path).convert("RGB")
@@ -375,7 +387,6 @@ def detect_field_progressive(
     m_per_px = cfg.scene_size_m / float(cfg.map_size[0])
     cx, cy = image.width / 2, image.height / 2
 
-    # تجهيز مصفوفات RGB/HSV مرة واحدة للصورة كاملة
     rgb_arr = np.asarray(image, dtype=np.uint8)
     hsv_img = image.convert("HSV")
     H_full = np.asarray(hsv_img.getchannel(0), dtype=np.uint8)
@@ -392,13 +403,11 @@ def detect_field_progressive(
         if corrected < min_area_m2:
             continue
 
-        # حساب إحداثيات مركز الصندوق بالنسبة للصورة
         bx = (box[0] + box[2]) / 2
         by = (box[1] + box[3]) / 2
         dx_m = (bx - cx) * m_per_px
         dy_m = (by - cy) * m_per_px
 
-        # تحويل فرق الإحداثيات إلى lat/lon
         dlat = -(dy_m / 111320.0)
         dlon = dx_m / (40075000.0 * math.cos(math.radians(lat)) / 360.0)
         flat = lat + dlat
@@ -406,7 +415,6 @@ def detect_field_progressive(
 
         center_dist = geodesic((lat, lon), (flat, flon)).meters
 
-        # تقدير نسبة الخضرة
         green_ratio = estimate_green_ratio(rgb_arr, hsv_arr, tuple(box.tolist()))
         if green_ratio < cfg.green_ratio_min:
             continue
@@ -433,9 +441,9 @@ def detect_field_progressive(
     chosen = None
     chosen_R = None
     for R in range(r_start, r_max + 1, r_step):
-        within = [c for c in candidates if c[0] <= R]  # c[0] = edge_dist
+        within = [c for c in candidates if c[0] <= R]
         if within:
-            chosen = min(within, key=lambda x: (x[0], x[1]))  # (edge, center)
+            chosen = min(within, key=lambda x: (x[0], x[1]))
             chosen_R = R
             break
 
@@ -444,7 +452,6 @@ def detect_field_progressive(
 
     edge_dist, center_dist, box, conf, area_m2, (flat, flon), green_ratio = chosen
 
-    # رسم الصندوق وخط من مركز الصورة إلى مركز الصندوق
     draw = ImageDraw.Draw(image)
     draw.rectangle(box.tolist(), outline="green", width=3)
     draw.line(
@@ -482,7 +489,6 @@ TOKEN_URL = (
 
 
 def get_cdse_token() -> str:
-    """الحصول على توكن CDSE مع استخدام session_state كـ cache."""
     tok = st.session_state.get("_cdse_token")
     exp = st.session_state.get("_cdse_token_exp", 0)
     if tok and time.time() < exp - 60:
@@ -513,7 +519,6 @@ def get_cdse_token() -> str:
 
 
 def bbox_from_meters(lat: float, lon: float, size_m: float):
-    """حساب صندوق (BBox) بالإحداثيات الجغرافية لمساحة مربعة حول نقطة معينة."""
     half = size_m / 2.0
     dlat = half / 111320.0
     dlon = half / (111320.0 * math.cos(math.radians(lat)))
@@ -522,10 +527,6 @@ def bbox_from_meters(lat: float, lon: float, size_m: float):
 
 @st.cache_data(show_spinner=False, ttl=24 * 3600)
 def download_image(lat: float, lon: float, meter_id: str, timeout: int = 30):
-    """
-    تحميل صورة Sentinel-2 من Copernicus لموقع عداد معين.
-    تستخدم Cache على مستوى الملف (images/meter_id.png).
-    """
     img_path = os.path.join(cfg.images_dir, f"{meter_id}.png")
     if os.path.exists(img_path):
         return img_path
@@ -575,7 +576,6 @@ function evaluatePixel(s){
     token = get_cdse_token()
     r = _request(token)
     if r.status_code == 401:
-        # إعادة المحاولة بتوكن جديد
         token = get_cdse_token()
         r = _request(token)
 
@@ -606,50 +606,91 @@ MODEL_PATH = os.path.join(cfg.models_dir, "best.pt")
 ML_MODEL_PATH = os.path.join(cfg.models_dir, "isolation_model.joblib")
 SCALER_PATH = os.path.join(cfg.models_dir, "isolation_scaler.joblib")
 
+# تحسين الشكل العام للخلفية
+st.markdown(
+    """
+    <style>
+    body {
+        background-color: #f0f2f6;
+    }
+    .block-container {
+        padding-top: 1.5rem;
+        padding-bottom: 1rem;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 st.title(cfg.page_title)
+st.markdown(
+    "<p style='color:#4a4f59;font-size:14px;'>منصة تحليل صور Sentinel-2 لاكتشاف الحقول الزراعية ذات مخاطر الفاقد في استهلاك المياه والكهرباء.</p>",
+    unsafe_allow_html=True,
+)
 
 uploaded = st.file_uploader("📁 رفع ملف البيانات (Excel)", type=["xlsx"])
-colors = {"قصوى": "#ff4d4d", "متوسطة": "#ffa500", "منخفضة": "#4CAF50"}
+colors = {"قصوى": "#e53935", "متوسطة": "#fb8c00", "منخفضة": "#43a047"}
 
 if uploaded:
     df = read_excel(uploaded)
+    st.sidebar.markdown(
+        "<h3 style='margin-bottom:0.5rem;'>⚙️ إعدادات التحليل</h3>",
+        unsafe_allow_html=True,
+    )
     st.sidebar.info(f"🔢 عدد الحالات في الملف: {len(df)}")
-
-    # ====== إعدادات إضافية من واجهة المستخدم ======
-    st.sidebar.markdown("### ⚙️ إعدادات التحليل")
 
     # فلترة حسب القاطع
     breaker_filter = st.sidebar.selectbox(
-        "سعة القاطع", ["الكل"] + sorted(df["Breaker"].unique().tolist())
+        "فلترة حسب سعة القاطع",
+        ["الكل"] + sorted(df["Breaker"].unique().tolist()),
     )
 
     # ترتيب حسب الاستهلاك
     sort_order = st.sidebar.radio(
-        "ترتيب حسب الاستهلاك", ["بدون ترتيب", "تصاعدي", "تنازلي"]
+        "ترتيب حسب الاستهلاك",
+        ["بدون ترتيب", "تصاعدي", "تنازلي"],
     )
 
-    # إمكانية تعديل أدنى مساحة وأدنى ثقة من الواجهة
+    # إعدادات مساحة وثقة YOLO
     cfg.min_area_m2 = st.sidebar.number_input(
-        "الحد الأدنى للمساحة (م²)",
+        "الحد الأدنى لمساحة الحقل (م²)",
         min_value=1000.0,
         max_value=50000.0,
         value=cfg.min_area_m2,
         step=500.0,
     )
     cfg.min_confidence_accept = st.sidebar.slider(
-        "أدنى ثقة لنموذج YOLO",
+        "أدنى نسبة ثقة لنموذج YOLO",
         min_value=0.1,
         max_value=0.9,
         value=cfg.min_confidence_accept,
         step=0.05,
     )
-    cfg.green_ratio_min = st.sidebar.slider(
-        "الحد الأدنى لنسبة الخضرة داخل الحقل (%)",
-        min_value=0.0,
-        max_value=100.0,
-        value=cfg.green_ratio_min * 100.0,
-        step=5.0,
-    ) / 100.0
+    cfg.green_ratio_min = (
+        st.sidebar.slider(
+            "الحد الأدنى لنسبة الخضرة داخل الحقل (%)",
+            min_value=0.0,
+            max_value=100.0,
+            value=cfg.green_ratio_min * 100.0,
+            step=5.0,
+        )
+        / 100.0
+    )
+
+    # إعدادات مسافة الحافة EDGE من الواجهة
+    st.sidebar.markdown(
+        "<hr style='margin:0.5rem 0;'><h4 style='margin-bottom:0.5rem;'>📏 إعدادات مسافة الحافة</h4>",
+        unsafe_allow_html=True,
+    )
+    cfg.r_max_m = st.sidebar.slider(
+        "أقصى مسافة حافة عن العداد (متر)",
+        min_value=20,
+        max_value=200,
+        value=50,
+        step=10,
+    )
+    cfg.r_start_m = 0
+    cfg.r_step_m = 10
 
     # فلترة حسب القاطع والاستهلاك
     if breaker_filter != "الكل":
@@ -660,8 +701,12 @@ if uploaded:
     elif sort_order == "تنازلي":
         df = df.sort_values(by="consumption", ascending=False)
 
-    preview_only = st.sidebar.checkbox("🖼️ عرض الصور فقط (بدون تشغيل نموذج المخاطر)")
-    if st.sidebar.button("📥 تنزيل/عرض الصور"):
+    preview_only = st.sidebar.checkbox(
+        "🖼️ عرض الصور فقط (بدون حساب المخاطر)", value=False
+    )
+
+    # ====== زر عرض/تنزيل الصور فقط ======
+    if st.sidebar.button("📥 تنزيل و معاينة الصور"):
         progress = st.sidebar.progress(0)
         cols = st.columns(4)
         shown = 0
@@ -678,9 +723,19 @@ if uploaded:
                     b64 = base64.b64encode(f.read()).decode()
                 cols[shown % 4].markdown(
                     f"""
-<div style="border:1px solid #ddd;border-radius:8px;padding:6px;margin:6px;text-align:center">
-  <img src="data:image/png;base64,{b64}" width="230" style="border-radius:6px"><br>
-  <small>عداد {meter}<br>Lat {lat:.6f}, Lon {lon:.6f}</small>
+<div style="
+  border-radius:10px;
+  border:1px solid #dfe3eb;
+  background-color:#ffffff;
+  padding:6px;
+  margin:6px;
+  text-align:center;
+  font-family:Tahoma, Arial, sans-serif;
+  font-size:12px;
+">
+  <img src="data:image/png;base64,{b64}" width="220" style="border-radius:6px;"><br>
+  <span style="color:#1f3b57;">عداد {meter}</span><br>
+  <span style="color:#555;">Lat {lat:.6f}, Lon {lon:.6f}</span>
 </div>""",
                     unsafe_allow_html=True,
                 )
@@ -692,6 +747,7 @@ if uploaded:
         )
         st.stop()
 
+    # ====== زر بدء التحليل الكامل ======
     if st.sidebar.button("🚀 بدء التحليل"):
         model_yolo = load_yolo(MODEL_PATH)
         risk_model = RiskModel(ML_MODEL_PATH, SCALER_PATH, cfg)
@@ -736,7 +792,6 @@ if uploaded:
                     progress.progress(i / max(n, 1))
                     continue
 
-                # إذا تم اختيار "عرض الصور فقط" لا نحسب المخاطر
                 if preview_only:
                     score, pr = 0.0, "غير محسوب"
                 else:
@@ -744,7 +799,6 @@ if uploaded:
                         br, cons, lon, lat, det.area_m2, det.green_ratio
                     )
 
-                # حفظ النتيجة للـ Excel/HTML
                 results.append(
                     [
                         meter,
@@ -807,16 +861,22 @@ if uploaded:
                 ],
             )
 
-            st.sidebar.markdown("### 📊 ملخص سريع")
+            # ترتيب داخلي حسب درجة الخطر
+            res_df = res_df.sort_values(by="risk_score", ascending=False)
+
+            st.sidebar.markdown(
+                "<h4 style='margin-top:0.5rem;'>📊 ملخص الأولويات</h4>",
+                unsafe_allow_html=True,
+            )
             st.sidebar.write(res_df["priority"].value_counts())
 
             st.sidebar.download_button(
-                "📥 نتائج Excel",
+                "📥 تنزيل النتائج (Excel)",
                 data=save_results_excel(res_df),
                 file_name="results.xlsx",
             )
             st.sidebar.download_button(
-                "📥 تقرير HTML",
+                "📥 تنزيل تقرير HTML",
                 data=save_results_html(results, colors, cfg.detected_dir),
                 file_name="report.html",
                 mime="text/html",
@@ -825,4 +885,7 @@ if uploaded:
         st.sidebar.success(f"⏱️ اكتمل التحليل في {round(time.time()-t0,1)} ثانية")
 
 st.markdown("---")
-st.markdown("👨‍💻 **تطوير :** مشهور العباس 2026 | 00966553339838 | ")
+st.markdown(
+    "<p style='font-size:12px;color:#777;'>👨‍💻 تطوير: مشهور العباس 2026 | 00966553339838</p>",
+    unsafe_allow_html=True,
+)
