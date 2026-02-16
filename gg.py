@@ -44,10 +44,10 @@ class AppConfig:
     # أدنى مساحة (م²) لقبول الحقل
     min_area_m2: float = 5000.0
 
-    # ✅ Progressive search by EDGE distance (ستُضبط من واجهة المستخدم)
+    # ✅ Progressive search by EDGE distance (تُضبط من واجهة المستخدم)
     r_start_m: int = 0
     r_step_m: int = 10
-    r_max_m: int = 50   # الحد الأعلى الافتراضي
+    r_max_m: int = 50
 
     # عتبات تصنيف المخاطر
     risk_low: float = 0.40
@@ -71,13 +71,20 @@ class AppConfig:
     green_dominance: float = 1.1
     green_min_value: int = 60
 
-    # ====== إعدادات نموذج المخاطر ======
+    # ====== إعدادات نموذج المخاطر (هندسية) ======
+    # علاقة سعة القاطع بالمساحة الخضراء
     breaker_area_coef: float = 0.0013
+    # الحد الأدنى للاستهلاك بالنسبة للمساحة الخضراء
     min_cons_coef: float = 0.20
-    w_r1: float = 0.4
-    w_r2: float = 0.4
-    w_r3: float = 0.2
 
+    # أوزان المعايير: نعطي الاستهلاك وزن أعلى
+    w_r1: float = 0.25   # القاطع
+    w_r2: float = 0.55   # الاستهلاك (أهم شيء)
+    w_r3: float = 0.20   # نموذج العزلة
+
+    # حدود “حقل كبير جداً” لاستخدام القواعد الصارمة
+    large_field_threshold_m2: float = 200_000.0
+    very_large_field_threshold_m2: float = 300_000.0
 
 cfg = AppConfig()
 
@@ -220,16 +227,30 @@ def load_yolo(model_path: str):
 
 
 class RiskModel:
+    """
+    نموذج مخاطر مصمم بمنطق هندسي:
+    - r1: تناسب القاطع مع المساحة الخضراء (تدريجي)
+    - r2: تناسب الاستهلاك مع المساحة الخضراء (تدريجي + قواعد مشددة للحقول الكبيرة)
+    - r3: ناتج نموذج العزلة (0/1)
+    - أوزان تعطي أولوية للاستهلاك
+    - قواعد override صريحة ترفع التصنيف للحالات غير المقبولة مهنياً
+    """
+
     def __init__(self, model_path: str, scaler_path: str, config: AppConfig):
         self.model = joblib.load(model_path)
         self.scaler = joblib.load(scaler_path)
         self.low_thr = config.risk_low
         self.high_thr = config.risk_high
+
         self.breaker_area_coef = config.breaker_area_coef
         self.min_cons_coef = config.min_cons_coef
+
         self.w_r1 = config.w_r1
         self.w_r2 = config.w_r2
         self.w_r3 = config.w_r3
+
+        self.large_field_threshold_m2 = config.large_field_threshold_m2
+        self.very_large_field_threshold_m2 = config.very_large_field_threshold_m2
 
     def compute(
         self,
@@ -241,16 +262,16 @@ class RiskModel:
         green_ratio: float,
     ):
         """
-        حساب درجة الخطر بشكل متدرج لتمييز الحالات داخل نفس الفئة.
+        حساب درجة الخطر بشكل متدرج مع قواعد هندسية صارمة للحقول الكبيرة ذات الاستهلاك المنخفض.
         """
         # 1) المساحة الخضراء الفعلية
         effective_area = area_m2 * green_ratio
 
-        # في حالة لا توجد خضرة تقريباً
         if effective_area <= 0:
+            # لا توجد خضرة فعلياً -> لا ننظر لها كحالة فاقد زراعي
             return 0.0, "منخفضة"
 
-        # 2) تحضير البيانات لنموذج العزلة
+        # 2) نموذج العزلة
         X = np.array([[breaker, consumption, lon, lat]], dtype=float)
         Xs = self.scaler.transform(X)
         anomaly = self.model.predict(Xs)[0]
@@ -263,29 +284,41 @@ class RiskModel:
             r1 = 0.0
         else:
             deficit_ratio = (needed_breaker - breaker) / needed_breaker
-            deficit_ratio = max(0.0, min(deficit_ratio, 1.0))
-            r1 = deficit_ratio
+            r1 = max(0.0, min(deficit_ratio, 1.0))
 
         # 4) معيار الاستهلاك (r2) - تدريجي
         needed_min_cons = effective_area * self.min_cons_coef
         if needed_min_cons <= 0:
             r2 = 0.0
+            cons_ratio = 1.0
         elif consumption >= needed_min_cons:
             r2 = 0.0
+            cons_ratio = 1.0
         else:
+            # نسبة النقص في الاستهلاك
             deficit_ratio = (needed_min_cons - consumption) / needed_min_cons
-            deficit_ratio = max(0.0, min(deficit_ratio, 1.0))
-            r2 = deficit_ratio
+            r2 = max(0.0, min(deficit_ratio, 1.0))
+            cons_ratio = consumption / needed_min_cons  # نسبة الاستهلاك إلى المتوقع
 
         # 5) معيار العزلة (r3)
-        # إذا كان نموذجك يرجع 1 = شاذ، -1 = عادي => عدّل الشرط
-        # هنا نفترض 1 = شاذ (حسب تعديلك السابق)
+        # حسب ما ذكرت سابقاً أن 1 تعني شاذ في تدريبك
         r3 = 1.0 if anomaly == 1 else 0.0
 
-        # 6) حساب النتيجة النهائية
+        # 6) تشديد خاص للحقول الكبيرة جداً + استهلاك ضعيف جداً (منطق مهندس)
+        # - large_field_threshold_m2: حقول كبيرة
+        # - very_large_field_threshold_m2: حقول شاسعة
+        if effective_area >= self.large_field_threshold_m2 and cons_ratio < 0.5:
+            # حقل كبير جداً واستهلاك أقل من 50% من الحد الأدنى المتوقع
+            r2 = min(1.0, r2 + 0.3)
+
+        if effective_area >= self.very_large_field_threshold_m2 and cons_ratio < 0.3:
+            # حقل شاسع جداً واستهلاك أقل من 30% من المتوقع
+            r2 = min(1.0, r2 + 0.4)
+
+        # 7) حساب النتيجة المبدئية
         score = self.w_r1 * r1 + self.w_r2 * r2 + self.w_r3 * r3
 
-        # 7) تصنيف الأولوية
+        # 8) تصنيف مبدئي
         if score >= self.high_thr:
             pr = "قصوى"
         elif score >= self.low_thr:
@@ -293,7 +326,30 @@ class RiskModel:
         else:
             pr = "منخفضة"
 
-        return score, pr
+        # 9) قواعد override هندسية صريحة:
+        #    لا يُسمح لحقل ضخم أخضر باستهلاك شبه معدوم أن يكون "منخفض"
+        high_risk_override = False
+
+        # حالة حرجة جداً: حقل شاسع، خضرة عالية، استهلاك أقل من 10% من المتوقع
+        if effective_area >= self.very_large_field_threshold_m2 and cons_ratio < 0.1:
+            high_risk_override = True
+            pr = "قصوى"
+            score = max(score, self.high_thr + 0.1)
+
+        # حالة متقدمة: حقل كبير، استهلاك أقل من 30% من المتوقع
+        elif effective_area >= self.large_field_threshold_m2 and cons_ratio < 0.3:
+            # لو كان "منخفضة" نرفعه على الأقل إلى "متوسطة"
+            if pr == "منخفضة":
+                pr = "متوسطة"
+            score = max(score, self.low_thr + 0.1)
+
+        # ضمان ألا ننزل حقل كبير جدًا واستهلاكه ضعيف جدًا تحت "متوسطة"
+        if effective_area >= self.large_field_threshold_m2 and cons_ratio < 0.5:
+            if pr == "منخفضة":
+                pr = "متوسطة"
+                score = max(score, self.low_thr + 0.05)
+
+        return float(score), pr
 
 
 # ======================= دالة تقدير الخضرة =======================
@@ -374,10 +430,9 @@ def detect_field_progressive(
     r_max: int,
 ) -> Optional[FieldDetection]:
     """
-    ✅ Progressive search by EDGE distance:
-    - البحث عن الحقل الأقرب باستخدام مسافة الحافة EDGE.
+    Progressive search by EDGE distance:
     - R = r_start, r_start + r_step, ..., r_max
-    - أول R يوجد فيه صندوق بـ edge_distance <= R يتم اختياره (الأقرب بالحافة ثم بالمركز).
+    - أول صندوق يحقق edge_distance <= R يُختار (الأقرب بالحافة ثم بالمركز).
     """
     image = Image.open(img_path).convert("RGB")
     boxes = detect_boxes(image, model_yolo, min_conf=min_conf_accept)
@@ -606,7 +661,7 @@ MODEL_PATH = os.path.join(cfg.models_dir, "best.pt")
 ML_MODEL_PATH = os.path.join(cfg.models_dir, "isolation_model.joblib")
 SCALER_PATH = os.path.join(cfg.models_dir, "isolation_scaler.joblib")
 
-# تحسين الشكل العام للخلفية
+# تحسين الشكل العام
 st.markdown(
     """
     <style>
@@ -639,19 +694,16 @@ if uploaded:
     )
     st.sidebar.info(f"🔢 عدد الحالات في الملف: {len(df)}")
 
-    # فلترة حسب القاطع
     breaker_filter = st.sidebar.selectbox(
         "فلترة حسب سعة القاطع",
         ["الكل"] + sorted(df["Breaker"].unique().tolist()),
     )
 
-    # ترتيب حسب الاستهلاك
     sort_order = st.sidebar.radio(
         "ترتيب حسب الاستهلاك",
         ["بدون ترتيب", "تصاعدي", "تنازلي"],
     )
 
-    # إعدادات مساحة وثقة YOLO
     cfg.min_area_m2 = st.sidebar.number_input(
         "الحد الأدنى لمساحة الحقل (م²)",
         min_value=1000.0,
@@ -677,7 +729,6 @@ if uploaded:
         / 100.0
     )
 
-    # إعدادات مسافة الحافة EDGE من الواجهة
     st.sidebar.markdown(
         "<hr style='margin:0.5rem 0;'><h4 style='margin-bottom:0.5rem;'>📏 إعدادات مسافة الحافة</h4>",
         unsafe_allow_html=True,
@@ -692,7 +743,6 @@ if uploaded:
     cfg.r_start_m = 0
     cfg.r_step_m = 10
 
-    # فلترة حسب القاطع والاستهلاك
     if breaker_filter != "الكل":
         df = df[df["Breaker"] == breaker_filter]
 
@@ -705,7 +755,7 @@ if uploaded:
         "🖼️ عرض الصور فقط (بدون حساب المخاطر)", value=False
     )
 
-    # ====== زر عرض/تنزيل الصور فقط ======
+    # عرض الصور فقط
     if st.sidebar.button("📥 تنزيل و معاينة الصور"):
         progress = st.sidebar.progress(0)
         cols = st.columns(4)
@@ -747,7 +797,7 @@ if uploaded:
         )
         st.stop()
 
-    # ====== زر بدء التحليل الكامل ======
+    # بدء التحليل
     if st.sidebar.button("🚀 بدء التحليل"):
         model_yolo = load_yolo(MODEL_PATH)
         risk_model = RiskModel(ML_MODEL_PATH, SCALER_PATH, cfg)
@@ -860,8 +910,6 @@ if uploaded:
                     "lon",
                 ],
             )
-
-            # ترتيب داخلي حسب درجة الخطر
             res_df = res_df.sort_values(by="risk_score", ascending=False)
 
             st.sidebar.markdown(
