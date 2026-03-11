@@ -16,6 +16,33 @@ st.set_page_config(
     page_icon="🌾"
 )
 
+# ─── رمز التحقق ─────────────────────────────────────────
+_DEFAULT_CODE = "ASD@2025"
+ACCESS_CODE = st.secrets.get("ACCESS_CODE", _DEFAULT_CODE)
+
+if "verified" not in st.session_state:
+    st.session_state["verified"] = False
+
+if not st.session_state["verified"]:
+    st.title("🔐 نظام اكتشاف حالات الفاقد الكهربائي للفئة الزراعية")
+    st.markdown("---")
+    st.subheader("أدخل رمز التحقق للدخول إلى النظام")
+    entered = st.text_input("رمز التحقق", type="password", placeholder="أدخل الرمز هنا")
+    col1, col2 = st.columns([1, 4])
+    with col1:
+        if st.button("✅ تحقق"):
+            if entered == ACCESS_CODE:
+                st.session_state["verified"] = True
+                st.rerun()
+            else:
+                st.error("❌ رمز التحقق غير صحيح. يرجى المحاولة مرة أخرى.")
+    # عرض الرمز للمسؤول عند استخدام الرمز الافتراضي (قبل ضبط secrets)
+    if ACCESS_CODE == _DEFAULT_CODE:
+        st.info(f"🔑 رمز التحقق الافتراضي: **{_DEFAULT_CODE}**  \n"
+                "_(لتغيير الرمز، أضف `ACCESS_CODE` في ملف Streamlit Secrets)_")
+    st.stop()
+# ─────────────────────────────────────────────────────────
+
 # المسارات الرئيسية
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 IMG_DIR = os.path.join(BASE_DIR, "images")
